@@ -1,5 +1,4 @@
 import { Link } from "react-router-dom";
-import { HeroScene } from "../components/home/HeroScene";
 import { SpeciesIcon } from "../components/icons/SpeciesIcon";
 import { Container } from "../components/layout/Container";
 import { Button } from "../components/ui/Button";
@@ -49,7 +48,14 @@ export function Home() {
                 </Button>
               </div>
             </div>
-            <HeroScene />
+            <div className="relative aspect-[6/5] w-full overflow-hidden rounded-xl bg-primary/[0.06]">
+              <img
+                src="https://images.dog.ceo/breeds/retriever-golden/n02099601_1010.jpg"
+                alt="A golden retriever standing outdoors"
+                className="h-full w-full object-cover"
+                loading="eager"
+              />
+            </div>
           </div>
         </Container>
       </section>
