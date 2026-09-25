@@ -61,29 +61,31 @@ export function Header() {
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-surface">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:h-[72px] lg:px-8">
-        <Link to="/" className="flex items-center gap-2.5" onClick={() => setOpen(false)}>
-          <PawMark />
-          <span className="font-display text-lg font-semibold text-ink">Paws Nearby</span>
-        </Link>
+        <div className="flex items-center gap-8">
+          <Link to="/" className="flex items-center gap-2.5" onClick={() => setOpen(false)}>
+            <PawMark />
+            <span className="font-display text-lg font-semibold text-ink">Paws Nearby</span>
+          </Link>
 
-        <nav className="hidden items-center gap-7 lg:flex" aria-label="Primary">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              className={({ isActive }) =>
-                `text-[15px] transition-colors ${
-                  isActive ? "font-medium text-primary" : "text-ink-soft hover:text-ink"
-                }`
-              }
-            >
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
+          <nav className="hidden items-center gap-6 xl:flex" aria-label="Primary">
+            {navItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) =>
+                  `whitespace-nowrap text-[15px] transition-colors ${
+                    isActive ? "font-medium text-primary" : "text-ink-soft hover:text-ink"
+                  }`
+                }
+              >
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
+        </div>
 
         <div className="flex items-center gap-3">
-          <div className="hidden items-center gap-4 lg:flex">
+          <div className="hidden items-center gap-4 xl:flex">
             {isSignedIn ? (
               <>
                 <Link to={roleHomePath(profile.role)} className="text-sm text-ink-soft hover:text-ink">
@@ -122,7 +124,7 @@ export function Header() {
           <button
             type="button"
             onClick={() => setOpen((value) => !value)}
-            className="flex h-10 w-10 items-center justify-center rounded-full text-ink lg:hidden"
+            className="flex h-10 w-10 items-center justify-center rounded-full text-ink xl:hidden"
             aria-label={open ? "Close menu" : "Open menu"}
             aria-expanded={open}
           >
@@ -132,7 +134,7 @@ export function Header() {
       </div>
 
       {open && (
-        <nav className="border-t border-border px-4 pb-5 pt-2 lg:hidden" aria-label="Primary">
+        <nav className="border-t border-border px-4 pb-5 pt-2 xl:hidden" aria-label="Primary">
           <ul className="flex flex-col gap-1">
             {navItems.map((item) => (
               <li key={item.to}>
