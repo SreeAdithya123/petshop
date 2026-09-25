@@ -5,10 +5,33 @@ import { roleHomePath, useAuthStore } from "../../store/authStore";
 import { useCartStore } from "../../store/cartStore";
 import { PawMark } from "./PawMark";
 
-const navItems = [
+const customerNavItems = [
   { to: "/pets", label: "Shop pets" },
+  { to: "/store", label: "Store" },
   { to: "/sellers", label: "Shops" },
+  { to: "/gifting", label: "Gifting" },
+  { to: "/learn", label: "Learn" },
+  { to: "/support", label: "Support" },
   { to: "/for-store-owners", label: "Sell on Paws Nearby" },
+];
+
+const sellerNavItems = [
+  { to: "/seller/dashboard", label: "Dashboard" },
+  { to: "/seller/store", label: "My Store" },
+  { to: "/seller/pets", label: "Pets" },
+  { to: "/seller/products", label: "Products" },
+  { to: "/seller/orders", label: "Orders" },
+  { to: "/seller/support", label: "Support" },
+  { to: "/seller/contract", label: "Contract" },
+];
+
+const adminNavItems = [
+  { to: "/admin/dashboard", label: "Dashboard" },
+  { to: "/admin/shops", label: "Shops" },
+  { to: "/admin/orders", label: "Orders" },
+  { to: "/admin/videos", label: "Videos" },
+  { to: "/admin/support", label: "Support" },
+  { to: "/admin/contracts", label: "Contracts" },
 ];
 
 export function Header() {
@@ -21,6 +44,13 @@ export function Header() {
   const profile = useAuthStore((state) => state.profile);
   const signOut = useAuthStore((state) => state.signOut);
   const isSignedIn = status === "signed-in" && profile;
+
+  const navItems =
+    isSignedIn && profile.role === "shop_owner"
+      ? sellerNavItems
+      : isSignedIn && profile.role === "admin"
+        ? adminNavItems
+        : customerNavItems;
 
   async function handleSignOut() {
     setOpen(false);
