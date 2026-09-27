@@ -69,7 +69,7 @@ export function Header() {
             </span>
           </Link>
 
-          <nav className="hidden items-center gap-6 xl:flex" aria-label="Primary">
+          <nav className="hidden items-center gap-6 lg:flex" aria-label="Primary">
             {navItems.map((item) => (
               <NavLink
                 key={item.to}
@@ -87,7 +87,7 @@ export function Header() {
         </div>
 
         <div className="flex items-center gap-3">
-          <div className="hidden items-center gap-4 xl:flex">
+          <div className="hidden items-center gap-4 lg:flex">
             {isSignedIn ? (
               <>
                 <Link to={roleHomePath(profile.role)} className="text-sm text-ink-soft hover:text-ink">
@@ -126,7 +126,7 @@ export function Header() {
           <button
             type="button"
             onClick={() => setOpen((value) => !value)}
-            className="flex h-10 w-10 items-center justify-center rounded-full text-ink xl:hidden"
+            className="flex h-10 w-10 items-center justify-center rounded-full text-ink lg:hidden"
             aria-label={open ? "Close menu" : "Open menu"}
             aria-expanded={open}
           >
@@ -136,7 +136,7 @@ export function Header() {
       </div>
 
       {open && (
-        <nav className="border-t border-border px-4 pb-5 pt-2 xl:hidden" aria-label="Primary">
+        <nav className="border-t border-border px-4 pb-5 pt-2 lg:hidden" aria-label="Primary">
           <ul className="flex flex-col gap-1">
             {navItems.map((item) => (
               <li key={item.to}>
