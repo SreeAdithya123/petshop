@@ -150,7 +150,7 @@ export function Home() {
                   <PawPrint size={16} weight="fill" /> {pets.length}+ pets across {shops.length} local shops
                 </div>
                 <h1 className="mt-4 font-display text-4xl font-black leading-tight md:text-6xl">
-                  The <span className="underline decoration-tertiary decoration-4 underline-offset-8">smartest</span>{" "}
+                  The <span className="underline decoration-pink-400 underline-offset-8">smartest</span>{" "}
                   way<br className="hidden md:block" /> to find your best friend
                 </h1>
                 <p className="mt-4 max-w-xl text-lg opacity-90 md:text-xl">
