@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Container } from "../../components/layout/Container";
 import { Button } from "../../components/ui/Button";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { RevenueChart } from "../../components/ui/RevenueChart";
 import { supabase } from "../../lib/supabaseClient";
 import { useMyShop } from "../../hooks/useMyShop";
 import { formatPrice, formatOrderDate } from "../../lib/format";
@@ -33,15 +34,14 @@ async function loadDashboardStats(shopId) {
     orderIds = [...new Set((itemRows || []).map((row) => row.order_id))];
   }
 
-  let recentOrders = [];
+  let allOrders = [];
   if (orderIds.length > 0) {
     const { data: orderRows } = await supabase
       .from("orders")
       .select("id, order_type, status, total_amount, created_at")
       .in("id", orderIds)
-      .order("created_at", { ascending: false })
-      .limit(5);
-    recentOrders = orderRows || [];
+      .order("created_at", { ascending: false });
+    allOrders = orderRows || [];
   }
 
   return {
@@ -51,7 +51,8 @@ async function loadDashboardStats(shopId) {
       soldCount: soldResult.count ?? 0,
       ordersCount: orderIds.length,
     },
-    recentOrders,
+    recentOrders: allOrders.slice(0, 5),
+    allOrders,
   };
 }
 
@@ -59,12 +60,14 @@ export function SellerDashboard() {
   const { shop, loading: shopLoading } = useMyShop();
   const [stats, setStats] = useState(null);
   const [recentOrders, setRecentOrders] = useState([]);
+  const [allOrders, setAllOrders] = useState([]);
   const [statsLoading, setStatsLoading] = useState(true);
 
   useEffect(() => {
     if (!shop) {
       setStats(null);
       setRecentOrders([]);
+      setAllOrders([]);
       setStatsLoading(false);
       return;
     }
@@ -72,10 +75,11 @@ export function SellerDashboard() {
     let cancelled = false;
     setStatsLoading(true);
 
-    loadDashboardStats(shop.id).then(({ stats: nextStats, recentOrders: nextOrders }) => {
+    loadDashboardStats(shop.id).then(({ stats: nextStats, recentOrders: nextOrders, allOrders: nextAllOrders }) => {
       if (cancelled) return;
       setStats(nextStats);
       setRecentOrders(nextOrders);
+      setAllOrders(nextAllOrders);
       setStatsLoading(false);
     });
 
@@ -120,6 +124,10 @@ export function SellerDashboard() {
             <StatCard label="Products listed" value={stats.productsCount} />
             <StatCard label="Pets sold" value={stats.soldCount} />
             <StatCard label="Orders" value={stats.ordersCount} />
+          </div>
+
+          <div className="mt-10">
+            <RevenueChart orders={allOrders} />
           </div>
 
           <div className="mt-10">

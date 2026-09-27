@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "../../lib/supabaseClient";
 import { Container } from "../../components/layout/Container";
 import { Button } from "../../components/ui/Button";
+import { RevenueChart } from "../../components/ui/RevenueChart";
 
 const STAT_DEFS = [
   { key: "totalShops", label: "Total shops" },
@@ -15,6 +16,7 @@ const STAT_DEFS = [
 export function AdminDashboard() {
   const [stats, setStats] = useState(null);
   const [pendingShops, setPendingShops] = useState([]);
+  const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -30,6 +32,7 @@ export function AdminDashboard() {
         totalOrders,
         totalCustomers,
         recentPending,
+        allOrders,
       ] = await Promise.all([
         supabase.from("shops").select("id", { count: "exact", head: true }),
         supabase.from("shops").select("id", { count: "exact", head: true }).eq("status", "pending"),
@@ -38,6 +41,7 @@ export function AdminDashboard() {
         supabase.from("orders").select("id", { count: "exact", head: true }),
         supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "customer"),
         supabase.from("shops").select("*").eq("status", "pending").order("created_at", { ascending: false }).limit(5),
+        supabase.from("orders").select("created_at, total_amount"),
       ]);
 
       if (cancelled) return;
@@ -51,6 +55,7 @@ export function AdminDashboard() {
         totalCustomers: totalCustomers.count ?? 0,
       });
       setPendingShops(recentPending.data ?? []);
+      setOrders(allOrders.data ?? []);
       setLoading(false);
     }
 
@@ -75,6 +80,12 @@ export function AdminDashboard() {
           </div>
         ))}
       </div>
+
+      {!loading && (
+        <div className="mt-10">
+          <RevenueChart orders={orders} />
+        </div>
+      )}
 
       <div className="mt-10">
         <h2 className="font-display text-xl font-semibold text-ink">Needs your attention</h2>
