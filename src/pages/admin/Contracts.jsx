@@ -60,9 +60,9 @@ export function AdminContracts() {
       <div className="mt-6 rounded-xl border border-border bg-surface p-6">
         <h2 className="font-display text-2xl font-semibold text-ink">Contract version {currentVersion}</h2>
         <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-ink-soft">
-          This agreement sets out the terms under which a shop lists pets and products on Paws Nearby,
+          This agreement sets out the terms under which a shop lists pets and products on PETSTA,
           including listing standards, pricing responsibilities, and payment handling between the shop and
-          its customers. It also confirms Paws Nearby's role as a marketplace connecting local buyers and
+          its customers. It also confirms PETSTA's role as a marketplace connecting local buyers and
           sellers, rather than a party to any individual sale. Shop owners are expected to review and accept
           the current version to keep selling on the platform.
         </p>

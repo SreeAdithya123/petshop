@@ -79,7 +79,7 @@ export function Sell() {
         <div className="max-w-xl">
           <h1 className="font-display text-3xl font-semibold text-ink md:text-4xl">List your shop</h1>
           <p className="mt-4 text-[15px] leading-relaxed text-ink-soft">
-            Paws Nearby connects nearby buyers with real, local pet shops. Tell us a bit about your shop
+            PETSTA connects nearby buyers with real, local pet shops. Tell us a bit about your shop
             and we'll reach out to help you get your available pets listed.
           </p>
           <ul className="mt-6 flex list-disc flex-col gap-3 pl-5 text-[15px] text-ink-soft">

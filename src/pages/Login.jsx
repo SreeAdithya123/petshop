@@ -48,7 +48,7 @@ export function Login() {
       <div className="mx-auto max-w-md">
         <h1 className="font-display text-3xl font-bold text-ink">Log in</h1>
         <p className="mt-2 text-[15px] text-ink-soft">
-          New to Paws Nearby?{" "}
+          New to PETSTA?{" "}
           <Link to="/signup" className="text-primary hover:underline">
             Create an account
           </Link>

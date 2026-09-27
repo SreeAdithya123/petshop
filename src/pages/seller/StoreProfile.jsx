@@ -114,7 +114,7 @@ export function SellerStoreProfile() {
         <h1 className="font-display text-3xl font-bold text-ink">{shop ? "Shop profile" : "Set up your shop"}</h1>
         <p className="mt-2 text-[15px] text-ink-soft">
           {shop
-            ? "Keep your shop's details up to date. Customers see this information across Paws Nearby."
+            ? "Keep your shop's details up to date. Customers see this information across PETSTA."
             : "Tell us about your shop. An admin will review and approve it before it goes live."}
         </p>
 

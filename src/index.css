@@ -1,25 +1,32 @@
 @import "tailwindcss";
 
-@import "@fontsource/sora/600.css";
-@import "@fontsource/sora/700.css";
-@import "@fontsource/work-sans/400.css";
-@import "@fontsource/work-sans/500.css";
+@import "@fontsource/plus-jakarta-sans/300.css";
+@import "@fontsource/plus-jakarta-sans/400.css";
+@import "@fontsource/plus-jakarta-sans/500.css";
+@import "@fontsource/plus-jakarta-sans/600.css";
+@import "@fontsource/plus-jakarta-sans/700.css";
+@import "@fontsource/plus-jakarta-sans/800.css";
 
 /*
-  Brand tokens per brief — see /docs/decisions.md. No serif, no Space
-  Grotesk/DM Sans: this is a consumer marketplace, not an editorial or
-  dev-tool identity.
+  PETSTA brand tokens. Single-family Plus Jakarta Sans (no separate
+  display/body face) with an indigo -> violet -> pink gradient identity;
+  --admin-accent (orange) is reserved for admin-only chrome so that mode is
+  visually distinct at a glance from the customer/seller surface.
 */
 :root {
-  --paper: #f7f3ed;
+  --paper: #f8fafc;
   --surface: #ffffff;
-  --ink: #14181f;
-  --ink-soft: #5c6570;
-  --primary: #1f3a5c;
-  --accent: #e8622e;
-  --trust: #2e7d6b;
-  --border: rgba(20, 24, 31, 0.12);
-  --error: #c63c33;
+  --ink: #0f172a;
+  --ink-soft: #64748b;
+  --primary: #4f46e5;
+  --secondary: #7c3aed;
+  --tertiary: #ec4899;
+  --accent: #ec4899;
+  --trust: #10b981;
+  --warning: #f59e0b;
+  --admin-accent: #ea580c;
+  --border: rgba(15, 23, 42, 0.1);
+  --error: #dc2626;
 }
 
 @theme {
@@ -28,13 +35,17 @@
   --color-ink: var(--ink);
   --color-ink-soft: var(--ink-soft);
   --color-primary: var(--primary);
+  --color-secondary: var(--secondary);
+  --color-tertiary: var(--tertiary);
   --color-accent: var(--accent);
   --color-trust: var(--trust);
+  --color-warning: var(--warning);
+  --color-admin-accent: var(--admin-accent);
   --color-border: var(--border);
   --color-error: var(--error);
 
-  --font-display: "Sora", ui-sans-serif, system-ui, sans-serif;
-  --font-body: "Work Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
 
   --breakpoint-xs: 420px;
 }

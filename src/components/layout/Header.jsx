@@ -12,7 +12,7 @@ const customerNavItems = [
   { to: "/gifting", label: "Gifting" },
   { to: "/learn", label: "Learn" },
   { to: "/support", label: "Support" },
-  { to: "/for-store-owners", label: "Sell on Paws Nearby" },
+  { to: "/for-store-owners", label: "Sell on PETSTA" },
 ];
 
 const sellerNavItems = [
@@ -64,7 +64,9 @@ export function Header() {
         <div className="flex items-center gap-8">
           <Link to="/" className="flex items-center gap-2.5" onClick={() => setOpen(false)}>
             <PawMark />
-            <span className="font-display text-lg font-semibold text-ink">Paws Nearby</span>
+            <span className="font-display text-xl font-black italic tracking-tighter text-ink">
+              PETSTA<span className="text-primary">.</span>
+            </span>
           </Link>
 
           <nav className="hidden items-center gap-6 xl:flex" aria-label="Primary">

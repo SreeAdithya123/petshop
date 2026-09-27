@@ -4,7 +4,7 @@ import { PawMark } from "./PawMark";
 const footerLinks = [
   { to: "/pets", label: "Shop pets" },
   { to: "/sellers", label: "Shops" },
-  { to: "/for-store-owners", label: "Sell on Paws Nearby" },
+  { to: "/for-store-owners", label: "Sell on PETSTA" },
 ];
 
 export function Footer() {
@@ -15,7 +15,9 @@ export function Footer() {
           <div>
             <Link to="/" className="flex items-center gap-2.5">
               <PawMark />
-              <span className="font-display text-xl font-semibold text-ink">Paws Nearby</span>
+              <span className="font-display text-xl font-black italic tracking-tighter text-ink">
+                PETSTA<span className="text-primary">.</span>
+              </span>
             </Link>
             <p className="mt-4 max-w-sm text-sm text-ink-soft">
               Pets in stock at licensed local pet stores, in one place. Shop online, then pick up and pay
@@ -36,7 +38,7 @@ export function Footer() {
         </div>
 
         <div className="mt-10 flex flex-col gap-2 border-t border-border pt-6 text-xs text-ink-soft sm:flex-row sm:items-center sm:justify-between">
-          <p>© {new Date().getFullYear()} Paws Nearby. Every listed shop is a licensed pet dealer.</p>
+          <p>© {new Date().getFullYear()} PETSTA. Every listed shop is a licensed pet dealer.</p>
           <p>Orders are picked up and paid for in person at the shop.</p>
         </div>
       </div>

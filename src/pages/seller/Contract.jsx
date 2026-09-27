@@ -54,7 +54,7 @@ export function SellerContract() {
   return (
     <Container className="py-12">
       <h1 className="font-display text-3xl font-bold text-ink">Seller contract</h1>
-      <p className="mt-2 text-[15px] text-ink-soft">The terms your shop operates under on Paws Nearby.</p>
+      <p className="mt-2 text-[15px] text-ink-soft">The terms your shop operates under on PETSTA.</p>
 
       <div className="mt-8 max-w-2xl rounded-xl border border-border bg-surface p-6">
         <dl className="flex flex-col gap-3">
@@ -80,7 +80,7 @@ export function SellerContract() {
             <p className="text-[15px] text-ink">
               By accepting this contract, you agree to list only pets and products you're licensed to sell,
               to keep your inventory and pricing accurate, to fulfill paid orders promptly, and to respond to
-              customer support requests in good faith. Paws Nearby may suspend shops that violate these terms.
+              customer support requests in good faith. PETSTA may suspend shops that violate these terms.
             </p>
             {error && <p className="mt-3 text-sm text-error">{error}</p>}
             <Button variant="accent" size="md" onClick={handleAccept} disabled={accepting} className="mt-5">
