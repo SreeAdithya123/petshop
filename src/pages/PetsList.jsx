@@ -1,14 +1,16 @@
 import { Funnel } from "@phosphor-icons/react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Container } from "../components/layout/Container";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FilterSidebar } from "../components/ui/FilterSidebar";
-import { PetCard } from "../components/ui/PetCard";
+import { PetCard, PetCardSkeleton } from "../components/ui/PetCard";
 import { SortSelect } from "../components/ui/SortSelect";
-import { pets } from "../data/pets";
 import { applyPetFilters, sortPets } from "../lib/petFilters";
+import { useCatalog } from "../store/catalogStore";
+
+const GRID_CLASS = "grid grid-cols-1 gap-3 xs:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 lg:gap-5 xl:grid-cols-5";
 
 function readArrayParam(searchParams, key) {
   const raw = searchParams.get(key);
@@ -16,6 +18,7 @@ function readArrayParam(searchParams, key) {
 }
 
 export function PetsList() {
+  const { pets, shops, speciesList, breedList, loading, error, reload } = useCatalog();
   const [searchParams, setSearchParams] = useSearchParams();
   const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -66,17 +69,16 @@ export function PetsList() {
     });
   }
 
-  const filteredPets = useMemo(() => {
-    const filtered = applyPetFilters(pets, {
+  const filteredPets = sortPets(
+    applyPetFilters(pets, {
       species,
       shops: shopIds,
       breeds,
       minPrice: minPrice ? Number(minPrice) : undefined,
       maxPrice: maxPrice ? Number(maxPrice) : undefined,
-    });
-    return sortPets(filtered, sort);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams.toString()]);
+    }),
+    sort,
+  );
 
   return (
     <Container className="py-10 lg:py-12">
@@ -84,7 +86,11 @@ export function PetsList() {
         <div>
           <h1 className="font-display text-3xl font-bold text-ink md:text-4xl">Shop pets</h1>
           <p className="mt-2 text-[15px] text-ink-soft">
-            {filteredPets.length} {filteredPets.length === 1 ? "pet" : "pets"} across every shop
+            {loading
+              ? "Loading pets…"
+              : error
+                ? "Pets from licensed local shops"
+                : `${filteredPets.length} ${filteredPets.length === 1 ? "pet" : "pets"} across every shop`}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -102,6 +108,9 @@ export function PetsList() {
 
       <div className="mt-8 lg:grid lg:grid-cols-[240px_1fr] lg:items-start lg:gap-10">
         <FilterSidebar
+          speciesList={speciesList}
+          breedList={breedList}
+          shops={shops}
           species={species}
           shopIds={shopIds}
           breeds={breeds}
@@ -117,12 +126,38 @@ export function PetsList() {
           hasActiveFilters={hasActiveFilters}
         />
 
-        {filteredPets.length > 0 ? (
-          <div className="grid grid-cols-1 gap-3 xs:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 lg:gap-5 xl:grid-cols-5">
+        {loading ? (
+          <div className={GRID_CLASS} role="status" aria-label="Loading pets">
+            {Array.from({ length: 10 }).map((_, index) => (
+              <PetCardSkeleton key={index} />
+            ))}
+          </div>
+        ) : error ? (
+          <EmptyState
+            title="We couldn't load pets"
+            description={error}
+            action={
+              <Button size="sm" onClick={reload}>
+                Try again
+              </Button>
+            }
+          />
+        ) : filteredPets.length > 0 ? (
+          <div className={GRID_CLASS}>
             {filteredPets.map((pet) => (
               <PetCard key={pet.id} pet={pet} />
             ))}
           </div>
+        ) : pets.length === 0 ? (
+          <EmptyState
+            title="No pets listed right now"
+            description="Shops haven't listed any pets yet. Check back soon."
+            action={
+              <Button to="/sellers" size="sm">
+                Browse shops
+              </Button>
+            }
+          />
         ) : (
           <EmptyState
             title="No pets match these filters"

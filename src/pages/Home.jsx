@@ -3,47 +3,47 @@ import {
   Envelope,
   HandHeart,
   Headset,
+  Heartbeat,
   MapPin,
   PawPrint,
+  Scissors,
   SealCheck,
   Stethoscope,
+  Storefront,
   TrendUp,
 } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { SpeciesIcon } from "../components/icons/SpeciesIcon";
 import { Container } from "../components/layout/Container";
 import { Button } from "../components/ui/Button";
-import { PetCard } from "../components/ui/PetCard";
-import { breedList, pets, speciesList } from "../data/pets";
-import { shops } from "../data/shops";
+import { EmptyState } from "../components/ui/EmptyState";
+import { PetCard, PetCardSkeleton } from "../components/ui/PetCard";
+import { PRODUCT_PUBLIC_COLUMNS } from "../lib/columns";
 import { formatPrice } from "../lib/format";
+import { sortPets } from "../lib/petFilters";
 import { supabase } from "../lib/supabaseClient";
+import { useCatalog } from "../store/catalogStore";
 
+// Species are free text on the seller side, so look styles up case-insensitively.
 const categoryStyle = {
-  Dog: { emoji: "🐶", color: "text-primary" },
-  Cat: { emoji: "🐱", color: "text-accent" },
-  Bird: { emoji: "🐦", color: "text-secondary" },
-  Rabbit: { emoji: "🐰", color: "text-trust" },
-  "Small Pet": { emoji: "🐹", color: "text-warning" },
+  dog: { emoji: "🐶", color: "text-primary" },
+  cat: { emoji: "🐱", color: "text-accent" },
+  bird: { emoji: "🐦", color: "text-secondary" },
+  rabbit: { emoji: "🐰", color: "text-trust" },
+  fish: { emoji: "🐟", color: "text-primary" },
+  hamster: { emoji: "🐹", color: "text-warning" },
+  "guinea pig": { emoji: "🐹", color: "text-warning" },
+  "small pet": { emoji: "🐹", color: "text-warning" },
+  turtle: { emoji: "🐢", color: "text-trust" },
+  reptile: { emoji: "🦎", color: "text-trust" },
 };
 
-const justListed = [...pets]
-  .filter((pet) => pet.status !== "sold")
-  .sort((a, b) => new Date(b.listedDate) - new Date(a.listedDate));
-
-const trending = justListed.slice(0, 4);
-const topPicks = [...pets]
-  .filter((pet) => pet.status !== "sold")
-  .sort((a, b) => b.price - a.price)
-  .slice(0, 4);
-
-const featuredBreeds = breedList.slice(0, 8).map((breed) => ({
-  breed,
-  pet: pets.find((pet) => pet.breed === breed),
-}));
-
-const topShops = [...shops].filter((shop) => shop.reviewCount > 0).sort((a, b) => b.rating - a.rating);
+const exploreLinks = [
+  { to: "/services", icon: Scissors, title: "Services", desc: "Vets, grooming, training and more" },
+  { to: "/health", icon: Heartbeat, title: "Health", desc: "Check-ups and everyday pet care" },
+  { to: "/store", icon: Storefront, title: "Store", desc: "Medicine and supplies from local shops" },
+];
 
 const whyPetsta = [
   { icon: Stethoscope, title: "Health info included", desc: "Species, breed, and age up front" },
@@ -55,34 +55,38 @@ const whyPetsta = [
 function StatCounter({ target, label }) {
   const [value, setValue] = useState(0);
   const ref = useRef(null);
-  const started = useRef(false);
 
+  // Counts up once the card scrolls into view; re-runs if the real total arrives later.
   useEffect(() => {
     const node = ref.current;
-    if (!node) return undefined;
+    if (!node || target === 0) return undefined;
+    let frame = 0;
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (!entry.isIntersecting || started.current) return;
-        started.current = true;
+        if (!entry.isIntersecting) return;
+        observer.disconnect();
         const duration = 900;
         const start = performance.now();
         function tick(now) {
           const progress = Math.min((now - start) / duration, 1);
           setValue(Math.round(target * (1 - (1 - progress) ** 3)));
-          if (progress < 1) requestAnimationFrame(tick);
+          if (progress < 1) frame = requestAnimationFrame(tick);
         }
-        requestAnimationFrame(tick);
+        frame = requestAnimationFrame(tick);
       },
       { threshold: 0.4 },
     );
     observer.observe(node);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
   }, [target]);
 
   return (
     <div ref={ref} className="rounded-2xl border border-border bg-surface p-6 text-center shadow-sm">
       <div className="bg-gradient-to-br from-primary via-secondary to-tertiary bg-clip-text font-display text-4xl font-black text-transparent">
-        {value.toLocaleString()}+
+        {value.toLocaleString()}
       </div>
       <p className="mt-1.5 text-sm font-semibold text-ink-soft">{label}</p>
     </div>
@@ -104,6 +108,7 @@ function GiftFeaturedCard({ product }) {
 }
 
 export function Home() {
+  const { pets, shops, speciesList, breedList, getPetsByShop, loading, error, reload } = useCatalog();
   const [featuredProducts, setFeaturedProducts] = useState([]);
   const [newsletterEmail, setNewsletterEmail] = useState("");
   const [newsletterState, setNewsletterState] = useState("idle"); // idle | sending | done | error
@@ -112,11 +117,12 @@ export function Home() {
     let cancelled = false;
     supabase
       .from("products")
-      .select("*, shops(name)")
+      .select(`${PRODUCT_PUBLIC_COLUMNS}, shops(name)`)
       .eq("status", "available")
       .order("created_at", { ascending: false })
       .limit(8)
       .then(({ data }) => {
+        // A supplementary strip: if the query fails it simply stays hidden.
         if (!cancelled) setFeaturedProducts(data ?? []);
       });
     return () => {
@@ -124,13 +130,29 @@ export function Home() {
     };
   }, []);
 
+  const { trending, topPicks, featuredBreeds, featuredShops, shopsAreRated } = useMemo(() => {
+    const ratedShops = shops.filter((shop) => shop.reviewCount > 0).sort((a, b) => b.rating - a.rating);
+    return {
+      trending: sortPets(pets, "newest").slice(0, 4),
+      topPicks: sortPets(pets, "price-desc").slice(0, 4),
+      featuredBreeds: breedList.slice(0, 8).map((breed) => ({
+        breed,
+        pet: pets.find((pet) => pet.breed === breed),
+      })),
+      shopsAreRated: ratedShops.length > 0,
+      featuredShops: (ratedShops.length > 0 ? ratedShops : shops).slice(0, 3),
+    };
+  }, [pets, shops, breedList]);
+
+  const showCatalog = !loading && !error && pets.length > 0;
+
   async function handleNewsletterSubmit(event) {
     event.preventDefault();
     const email = newsletterEmail.trim();
     if (!email) return;
     setNewsletterState("sending");
-    const { error } = await supabase.from("newsletter_subscribers").insert({ email });
-    if (error && !error.message?.toLowerCase().includes("duplicate")) {
+    const { error: insertError } = await supabase.from("newsletter_subscribers").insert({ email });
+    if (insertError && !insertError.message?.toLowerCase().includes("duplicate")) {
       setNewsletterState("error");
       return;
     }
@@ -147,7 +169,12 @@ export function Home() {
             <div className="relative z-10">
               <div className="max-w-2xl">
                 <div className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/15 px-4 py-1.5 text-sm font-semibold backdrop-blur-sm">
-                  <PawPrint size={16} weight="fill" /> {pets.length}+ pets across {shops.length} local shops
+                  <PawPrint size={16} weight="fill" />{" "}
+                  {showCatalog
+                    ? `${pets.length} ${pets.length === 1 ? "pet" : "pets"} across ${shops.length} local ${
+                        shops.length === 1 ? "shop" : "shops"
+                      }`
+                    : "Pets from licensed local shops"}
                 </div>
                 <h1 className="mt-4 font-display text-4xl font-black leading-tight md:text-6xl">
                   The <span className="underline decoration-pink-400 underline-offset-8">smartest</span>{" "}
@@ -208,16 +235,85 @@ export function Home() {
         </Container>
       </section>
 
-      {/* Stats */}
+      {/* More than pets */}
       <section className="mt-12 md:mt-16">
         <Container>
-          <div className="grid grid-cols-3 gap-4">
-            <StatCounter target={pets.length} label="Pets listed" />
-            <StatCounter target={shops.length} label="Local shops" />
-            <StatCounter target={speciesList.length} label="Species available" />
+          <div className="grid gap-4 sm:grid-cols-3">
+            {exploreLinks.map(({ to, icon: Icon, title, desc }) => (
+              <Link
+                key={to}
+                to={to}
+                className="flex items-center gap-4 rounded-2xl border border-border bg-surface p-4 transition-[box-shadow,transform] duration-200 hover:-translate-y-1 hover:shadow-[0_16px_32px_-16px_rgba(15,23,42,0.2)]"
+              >
+                <span className="flex h-11 w-11 flex-none items-center justify-center rounded-xl bg-primary/10 text-primary">
+                  <Icon size={24} weight="duotone" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block font-display text-base font-bold text-ink">{title}</span>
+                  <span className="block truncate text-sm text-ink-soft">{desc}</span>
+                </span>
+                <ArrowRight size={16} weight="bold" className="flex-none text-ink-soft" />
+              </Link>
+            ))}
           </div>
         </Container>
       </section>
+
+      {/* Catalog status: skeleton while loading, retry on error, friendly empty state */}
+      {loading && (
+        <section className="mt-12 md:mt-16">
+          <Container>
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-4" role="status" aria-label="Loading pets">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <PetCardSkeleton key={index} />
+              ))}
+            </div>
+          </Container>
+        </section>
+      )}
+      {!loading && error && (
+        <section className="mt-12 md:mt-16">
+          <Container>
+            <EmptyState
+              title="We couldn't load pets right now"
+              description={error}
+              action={
+                <Button size="sm" onClick={reload}>
+                  Try again
+                </Button>
+              }
+            />
+          </Container>
+        </section>
+      )}
+      {!loading && !error && pets.length === 0 && (
+        <section className="mt-12 md:mt-16">
+          <Container>
+            <EmptyState
+              title="No pets listed right now"
+              description="Shops haven't listed any pets yet. Check back soon."
+              action={
+                <Button to="/sellers" size="sm">
+                  Browse shops
+                </Button>
+              }
+            />
+          </Container>
+        </section>
+      )}
+
+      {/* Stats */}
+      {showCatalog && (
+        <section className="mt-12 md:mt-16">
+          <Container>
+            <div className="grid grid-cols-3 gap-4">
+              <StatCounter target={pets.length} label="Pets listed" />
+              <StatCounter target={shops.length} label="Local shops" />
+              <StatCounter target={speciesList.length} label="Species available" />
+            </div>
+          </Container>
+        </section>
+      )}
 
       {/* Featured products */}
       {featuredProducts.length > 0 && (
@@ -238,114 +334,124 @@ export function Home() {
         </section>
       )}
 
-      {/* Popular breeds */}
-      <section className="mt-12 md:mt-16">
-        <Container>
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="font-display text-2xl font-black text-ink">🐾 Popular breeds</h2>
-            <Link to="/pets" className="text-sm font-bold text-primary hover:underline">
-              Explore all
-            </Link>
-          </div>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            {featuredBreeds.map(({ breed, pet }) => (
-              <Link
-                key={breed}
-                to={`/pets?breed=${encodeURIComponent(breed)}`}
-                className="group overflow-hidden rounded-2xl border border-border bg-surface transition-[box-shadow,transform] duration-200 hover:-translate-y-1 hover:shadow-[0_16px_32px_-16px_rgba(15,23,42,0.2)]"
-              >
-                <div className="aspect-square overflow-hidden bg-primary/[0.06]">
-                  {pet?.photos?.[0] ? (
-                    <img
-                      src={pet.photos[0]}
-                      alt={breed}
-                      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.05]"
-                    />
-                  ) : (
-                    <SpeciesIcon species={pet?.species} className="h-full w-full" />
-                  )}
+      {showCatalog && (
+        <>
+          {/* Popular breeds */}
+          <section className="mt-12 md:mt-16">
+            <Container>
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="font-display text-2xl font-black text-ink">🐾 Popular breeds</h2>
+                <Link to="/pets" className="text-sm font-bold text-primary hover:underline">
+                  Explore all
+                </Link>
+              </div>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                {featuredBreeds.map(({ breed, pet }) => (
+                  <Link
+                    key={breed}
+                    to={`/pets?breed=${encodeURIComponent(breed)}`}
+                    className="group overflow-hidden rounded-2xl border border-border bg-surface transition-[box-shadow,transform] duration-200 hover:-translate-y-1 hover:shadow-[0_16px_32px_-16px_rgba(15,23,42,0.2)]"
+                  >
+                    <div className="aspect-square overflow-hidden bg-primary/[0.06]">
+                      {pet?.photos?.[0] ? (
+                        <img
+                          src={pet.photos[0]}
+                          alt={breed}
+                          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.05]"
+                        />
+                      ) : (
+                        <SpeciesIcon species={pet?.species} className="h-full w-full" />
+                      )}
+                    </div>
+                    <p className="truncate px-3 py-2.5 text-sm font-semibold text-ink">{breed}</p>
+                  </Link>
+                ))}
+              </div>
+            </Container>
+          </section>
+
+          {/* Trending & top picks */}
+          <section className="mt-12 md:mt-16">
+            <Container>
+              <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
+                <div>
+                  <h2 className="mb-4 flex items-center gap-2 font-display text-2xl font-black text-ink">
+                    <TrendUp size={24} weight="bold" className="text-trust" /> Trending now
+                  </h2>
+                  <div className="grid grid-cols-2 gap-4">
+                    {trending.map((pet) => (
+                      <PetCard key={pet.id} pet={pet} />
+                    ))}
+                  </div>
                 </div>
-                <p className="truncate px-3 py-2.5 text-sm font-semibold text-ink">{breed}</p>
-              </Link>
-            ))}
-          </div>
-        </Container>
-      </section>
-
-      {/* Trending & top picks */}
-      <section className="mt-12 md:mt-16">
-        <Container>
-          <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
-            <div>
-              <h2 className="mb-4 flex items-center gap-2 font-display text-2xl font-black text-ink">
-                <TrendUp size={24} weight="bold" className="text-trust" /> Trending now
-              </h2>
-              <div className="grid grid-cols-2 gap-4">
-                {trending.map((pet) => (
-                  <PetCard key={pet.id} pet={pet} />
-                ))}
+                <div>
+                  <h2 className="mb-4 flex items-center gap-2 font-display text-2xl font-black text-ink">
+                    <HandHeart size={24} weight="bold" className="text-accent" /> Top picks
+                  </h2>
+                  <div className="grid grid-cols-2 gap-4">
+                    {topPicks.map((pet) => (
+                      <PetCard key={pet.id} pet={pet} />
+                    ))}
+                  </div>
+                </div>
               </div>
-            </div>
-            <div>
-              <h2 className="mb-4 flex items-center gap-2 font-display text-2xl font-black text-ink">
-                <HandHeart size={24} weight="bold" className="text-accent" /> Top picks
-              </h2>
-              <div className="grid grid-cols-2 gap-4">
-                {topPicks.map((pet) => (
-                  <PetCard key={pet.id} pet={pet} />
-                ))}
-              </div>
-            </div>
-          </div>
-        </Container>
-      </section>
+            </Container>
+          </section>
 
-      {/* Top-rated shops */}
-      {topShops.length > 0 && (
-        <section className="mt-12 md:mt-16">
-          <Container>
-            <h2 className="font-display text-2xl font-black text-ink">⭐ Top-rated shops</h2>
-            <div className="mt-6 grid gap-5 sm:grid-cols-3">
-              {topShops.slice(0, 3).map((shop) => (
-                <Link
-                  key={shop.id}
-                  to={`/sellers/${shop.id}`}
-                  className="rounded-2xl border border-border bg-surface p-5 transition-[box-shadow,transform] duration-200 hover:-translate-y-1 hover:shadow-[0_16px_32px_-16px_rgba(15,23,42,0.2)]"
-                >
-                  <h3 className="font-display text-base font-bold text-ink">{shop.name}</h3>
-                  <p className="mt-1 text-sm text-ink-soft">
-                    ⭐ {shop.rating.toFixed(1)} ({shop.reviewCount})
-                  </p>
-                  <p className="mt-2 flex items-center gap-1.5 text-sm text-ink-soft">
-                    <MapPin size={15} /> {shop.city}
-                  </p>
-                </Link>
-              ))}
-            </div>
-          </Container>
-        </section>
+          {/* Top-rated shops (or just the shops, until reviews come in) */}
+          {featuredShops.length > 0 && (
+            <section className="mt-12 md:mt-16">
+              <Container>
+                <h2 className="font-display text-2xl font-black text-ink">
+                  {shopsAreRated ? "⭐ Top-rated shops" : "🏬 Local shops"}
+                </h2>
+                <div className="mt-6 grid gap-5 sm:grid-cols-3">
+                  {featuredShops.map((shop) => {
+                    const petCount = getPetsByShop(shop.id).length;
+                    return (
+                      <Link
+                        key={shop.id}
+                        to={`/sellers/${shop.id}`}
+                        className="rounded-2xl border border-border bg-surface p-5 transition-[box-shadow,transform] duration-200 hover:-translate-y-1 hover:shadow-[0_16px_32px_-16px_rgba(15,23,42,0.2)]"
+                      >
+                        <h3 className="font-display text-base font-bold text-ink">{shop.name}</h3>
+                        <p className="mt-1 text-sm text-ink-soft">
+                          {shop.reviewCount > 0 ? `⭐ ${shop.rating.toFixed(1)} (${shop.reviewCount})` : "No reviews yet"}
+                        </p>
+                        <p className="mt-2 flex items-center gap-1.5 text-sm text-ink-soft">
+                          <PawPrint size={15} />
+                          {petCount} {petCount === 1 ? "pet" : "pets"} listed
+                        </p>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </Container>
+            </section>
+          )}
+
+          {/* Category grid */}
+          <section className="mt-12 md:mt-16">
+            <Container>
+              <div className="grid grid-cols-3 gap-4 sm:grid-cols-5">
+                {speciesList.map((species) => {
+                  const style = categoryStyle[species.toLowerCase()] ?? { emoji: "🐾", color: "text-primary" };
+                  return (
+                    <Link
+                      key={species}
+                      to={`/pets?species=${encodeURIComponent(species)}`}
+                      className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-4 text-center transition-[box-shadow,transform] duration-200 hover:-translate-y-1 hover:shadow-[0_16px_32px_-16px_rgba(15,23,42,0.2)]"
+                    >
+                      <span className={`text-4xl ${style.color}`}>{style.emoji}</span>
+                      <p className="font-display text-sm font-bold text-ink">{species}</p>
+                    </Link>
+                  );
+                })}
+              </div>
+            </Container>
+          </section>
+        </>
       )}
-
-      {/* Category grid */}
-      <section className="mt-12 md:mt-16">
-        <Container>
-          <div className="grid grid-cols-3 gap-4 sm:grid-cols-5">
-            {speciesList.map((species) => {
-              const style = categoryStyle[species] ?? { emoji: "🐾", color: "text-primary" };
-              return (
-                <Link
-                  key={species}
-                  to={`/pets?species=${encodeURIComponent(species)}`}
-                  className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-4 text-center transition-[box-shadow,transform] duration-200 hover:-translate-y-1 hover:shadow-[0_16px_32px_-16px_rgba(15,23,42,0.2)]"
-                >
-                  <span className={`text-4xl ${style.color}`}>{style.emoji}</span>
-                  <p className="font-display text-sm font-bold text-ink">{species}</p>
-                </Link>
-              );
-            })}
-          </div>
-        </Container>
-      </section>
 
       {/* Newsletter */}
       <section className="mt-12 pb-20 md:mt-16">

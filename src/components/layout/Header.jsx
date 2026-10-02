@@ -9,25 +9,25 @@ const customerNavItems = [
   { to: "/pets", label: "Shop pets" },
   { to: "/store", label: "Store" },
   { to: "/sellers", label: "Shops" },
+  { to: "/services", label: "Services" },
+  { to: "/health", label: "Health" },
   { to: "/gifting", label: "Gifting" },
-  { to: "/learn", label: "Learn" },
   { to: "/support", label: "Support" },
-  { to: "/for-store-owners", label: "Sell on PETSTA" },
 ];
 
+// The full seller menu lives in the dashboard sidebar; the header keeps the essentials.
 const sellerNavItems = [
   { to: "/seller/dashboard", label: "Dashboard" },
-  { to: "/seller/store", label: "My Store" },
-  { to: "/seller/pets", label: "Pets" },
-  { to: "/seller/products", label: "Products" },
   { to: "/seller/orders", label: "Orders" },
-  { to: "/seller/support", label: "Support" },
-  { to: "/seller/contract", label: "Contract" },
+  { to: "/seller/services", label: "Services" },
+  { to: "/seller/demos", label: "Demo requests" },
+  { to: "/seller/refunds", label: "Refunds" },
 ];
 
 const adminNavItems = [
   { to: "/admin/dashboard", label: "Dashboard" },
   { to: "/admin/shops", label: "Shops" },
+  { to: "/admin/services", label: "Services" },
   { to: "/admin/orders", label: "Orders" },
   { to: "/admin/videos", label: "Videos" },
   { to: "/admin/support", label: "Support" },
@@ -44,6 +44,7 @@ export function Header() {
   const profile = useAuthStore((state) => state.profile);
   const signOut = useAuthStore((state) => state.signOut);
   const isSignedIn = status === "signed-in" && profile;
+  const accountLabel = profile?.role === "customer" ? "My account" : profile?.name || "Account";
 
   const navItems =
     isSignedIn && profile.role === "shop_owner"
@@ -91,7 +92,7 @@ export function Header() {
             {isSignedIn ? (
               <>
                 <Link to={roleHomePath(profile.role)} className="text-sm text-ink-soft hover:text-ink">
-                  {profile.name || "Account"}
+                  {accountLabel}
                 </Link>
                 <button type="button" onClick={handleSignOut} className="text-sm text-ink-soft hover:text-ink">
                   Log out
@@ -163,7 +164,7 @@ export function Header() {
                   onClick={() => setOpen(false)}
                   className="block rounded-lg px-3 py-2.5 text-[15px] text-ink-soft"
                 >
-                  {profile.name || "Account"}
+                  {accountLabel}
                 </Link>
                 <button
                   type="button"

@@ -1,24 +1,27 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Container } from "../../components/layout/Container";
 import { Button } from "../../components/ui/Button";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { Field } from "../../components/ui/FormField";
+import { StatusBadge } from "../../components/ui/StatusBadge";
 import { supabase } from "../../lib/supabaseClient";
+import { fieldClassName } from "../../lib/styles";
 import { useMyShop } from "../../hooks/useMyShop";
 import { formatPrice } from "../../lib/format";
 
-function fieldClassName(hasError) {
-  return `mt-1.5 w-full rounded-lg border bg-surface px-4 py-2.5 text-[15px] text-ink focus:outline-none ${
-    hasError ? "border-error focus:border-error" : "border-border focus:border-primary"
-  }`;
-}
+const GENDER_OPTIONS = [
+  { value: "", label: "Unknown" },
+  { value: "Male", label: "Male" },
+  { value: "Female", label: "Female" },
+];
 
-const statusStyles = {
-  available: "text-trust",
-  reserved: "text-ink-soft",
-  sold: "text-error",
-};
+// StatusBadge has no dedicated tone for "reserved", so borrow the amber one.
+const BADGE_STATUS = { reserved: "pending" };
+const STATUS_LABELS = { available: "Available", reserved: "Reserved", sold: "Sold" };
 
 const emptyForm = {
+  name: "",
+  gender: "",
   species: "",
   breed: "",
   age_months: "",
@@ -27,8 +30,38 @@ const emptyForm = {
   photo_urls: "",
 };
 
+function petToForm(pet) {
+  return {
+    name: pet.name ?? "",
+    gender: pet.gender ?? "",
+    species: pet.species ?? "",
+    breed: pet.breed ?? "",
+    age_months: String(pet.age_months ?? ""),
+    price: String(pet.price ?? ""),
+    description: pet.description ?? "",
+    photo_urls: (pet.photo_urls ?? []).join(", "),
+  };
+}
+
+function formToPayload(form) {
+  return {
+    name: form.name.trim(),
+    gender: form.gender || null,
+    species: form.species.trim(),
+    breed: form.breed.trim(),
+    age_months: Number(form.age_months),
+    price: Number(form.price),
+    description: form.description.trim() || null,
+    photo_urls: form.photo_urls
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean),
+  };
+}
+
 function validate(form) {
   const errors = {};
+  if (!form.name.trim()) errors.name = "Enter a name for this pet.";
   if (!form.species.trim()) errors.species = "Enter a species.";
   if (!form.breed.trim()) errors.breed = "Enter a breed.";
   if (!form.age_months.trim()) errors.age_months = "Enter the pet's age in months.";
@@ -41,39 +74,85 @@ function validate(form) {
 }
 
 export function SellerPets() {
-  const { shop, loading: shopLoading } = useMyShop();
+  const { shop, loading: shopLoading, error: shopError } = useMyShop();
   const [pets, setPets] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const [formOpen, setFormOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(emptyForm);
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  async function loadPets(shopId) {
-    setLoading(true);
-    const { data, error: queryError } = await supabase
-      .from("pets")
-      .select("*")
-      .eq("shop_id", shopId)
-      .order("created_at", { ascending: false });
-    if (queryError) setError(queryError.message);
-    else {
-      setError(null);
-      setPets(data || []);
-    }
-    setLoading(false);
-  }
+  const [busyId, setBusyId] = useState(null);
+  const [actionError, setActionError] = useState("");
+  const formRef = useRef(null);
+
+  const reload = () => setReloadKey((key) => key + 1);
 
   useEffect(() => {
-    if (shop) loadPets(shop.id);
-    else setLoading(false);
-  }, [shop]);
+    if (shopLoading) return undefined;
+    if (!shop) {
+      setLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function loadPets() {
+      const { data, error: queryError } = await supabase
+        .from("pets")
+        .select("*")
+        .eq("shop_id", shop.id)
+        .order("created_at", { ascending: false });
+      if (cancelled) return;
+      if (queryError) setError(queryError.message);
+      else {
+        setError(null);
+        setPets(data || []);
+      }
+      setLoading(false);
+    }
+
+    loadPets();
+    return () => {
+      cancelled = true;
+    };
+  }, [shop, shopLoading, reloadKey]);
+
+  useEffect(() => {
+    if (formOpen) formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [formOpen, editingId]);
 
   function updateField(field, value) {
     setForm((prev) => ({ ...prev, [field]: value }));
+  }
+
+  function resetForm() {
+    setEditingId(null);
+    setForm(emptyForm);
+    setErrors({});
+    setFormError("");
+  }
+
+  function openAddForm() {
+    resetForm();
+    setFormOpen(true);
+  }
+
+  function openEditForm(pet) {
+    resetForm();
+    setEditingId(pet.id);
+    setForm(petToForm(pet));
+    setFormOpen(true);
+  }
+
+  function closeForm() {
+    resetForm();
+    setFormOpen(false);
   }
 
   async function handleSubmit(event) {
@@ -85,56 +164,56 @@ export function SellerPets() {
 
     setSubmitting(true);
     try {
-      const photoUrls = form.photo_urls
-        .split(",")
-        .map((url) => url.trim())
-        .filter(Boolean);
+      const payload = formToPayload(form);
+      const { error: saveError } = editingId
+        ? await supabase.from("pets").update(payload).eq("id", editingId)
+        : await supabase.from("pets").insert({ shop_id: shop.id, ...payload });
+      if (saveError) throw saveError;
 
-      const { error: insertError } = await supabase.from("pets").insert({
-        shop_id: shop.id,
-        species: form.species.trim(),
-        breed: form.breed.trim(),
-        age_months: Number(form.age_months),
-        price: Number(form.price),
-        description: form.description.trim() || null,
-        photo_urls: photoUrls,
-      });
-      if (insertError) throw insertError;
-
-      setForm(emptyForm);
-      setErrors({});
-      setFormOpen(false);
-      await loadPets(shop.id);
+      closeForm();
+      reload();
     } catch (submitError) {
-      setFormError(submitError.message || "Something went wrong adding this pet.");
+      setFormError(submitError.message || "Something went wrong saving this pet.");
     } finally {
       setSubmitting(false);
     }
   }
 
-  async function markSold(petId) {
-    const { error: updateError } = await supabase.from("pets").update({ status: "sold" }).eq("id", petId);
-    if (!updateError) await loadPets(shop.id);
+  async function changeStatus(petId, status) {
+    setActionError("");
+    setBusyId(petId);
+    const { error: updateError } = await supabase.from("pets").update({ status }).eq("id", petId);
+    setBusyId(null);
+    if (updateError) setActionError(updateError.message);
+    else reload();
   }
 
   async function deletePet(petId) {
     if (!window.confirm("Delete this listing?")) return;
+    setActionError("");
+    setBusyId(petId);
     const { error: deleteError } = await supabase.from("pets").delete().eq("id", petId);
-    if (!deleteError) await loadPets(shop.id);
+    setBusyId(null);
+    if (deleteError) setActionError(deleteError.message);
+    else reload();
   }
 
   if (!shopLoading && !shop) {
     return (
       <Container className="py-12">
-        <EmptyState
-          title="You haven't set up your shop yet"
-          description="Create your shop profile to start listing pets and products."
-          action={
-            <Button to="/seller/store" size="sm">
-              Set up your shop
-            </Button>
-          }
-        />
+        {shopError ? (
+          <p className="text-[15px] text-error">Couldn't load your shop: {shopError}</p>
+        ) : (
+          <EmptyState
+            title="You haven't set up your shop yet"
+            description="Create your shop profile to start listing pets and products."
+            action={
+              <Button to="/seller/store" size="sm">
+                Set up your shop
+              </Button>
+            }
+          />
+        )}
       </Container>
     );
   }
@@ -143,22 +222,48 @@ export function SellerPets() {
     <Container className="py-12">
       <div className="flex items-center justify-between gap-4">
         <h1 className="font-display text-3xl font-bold text-ink">Pets</h1>
-        <Button type="button" variant="accent" size="sm" onClick={() => setFormOpen((open) => !open)}>
+        <Button type="button" variant="accent" size="sm" disabled={!shop} onClick={formOpen ? closeForm : openAddForm}>
           {formOpen ? "Cancel" : "Add a pet"}
         </Button>
       </div>
 
       {formOpen && (
         <form
+          ref={formRef}
           onSubmit={handleSubmit}
           noValidate
-          className="mt-6 flex flex-col gap-5 rounded-xl border border-border bg-surface p-6"
+          className="mt-6 flex scroll-mt-6 flex-col gap-5 rounded-xl border border-border bg-surface p-6"
         >
+          <h2 className="font-display text-lg font-semibold text-ink">{editingId ? "Edit pet" : "Add a pet"}</h2>
+
           <div className="grid gap-5 sm:grid-cols-2">
-            <div>
-              <label htmlFor="species" className="block text-sm text-ink">
-                Species
-              </label>
+            <Field label="Name" htmlFor="name" error={errors.name}>
+              <input
+                id="name"
+                type="text"
+                value={form.name}
+                onChange={(event) => updateField("name", event.target.value)}
+                aria-invalid={Boolean(errors.name)}
+                className={fieldClassName(Boolean(errors.name))}
+              />
+            </Field>
+
+            <Field label="Gender" htmlFor="gender">
+              <select
+                id="gender"
+                value={form.gender}
+                onChange={(event) => updateField("gender", event.target.value)}
+                className={fieldClassName(false)}
+              >
+                {GENDER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+
+            <Field label="Species" htmlFor="species" error={errors.species}>
               <input
                 id="species"
                 type="text"
@@ -167,13 +272,9 @@ export function SellerPets() {
                 aria-invalid={Boolean(errors.species)}
                 className={fieldClassName(Boolean(errors.species))}
               />
-              {errors.species && <p className="mt-1.5 text-sm text-error">{errors.species}</p>}
-            </div>
+            </Field>
 
-            <div>
-              <label htmlFor="breed" className="block text-sm text-ink">
-                Breed
-              </label>
+            <Field label="Breed" htmlFor="breed" error={errors.breed}>
               <input
                 id="breed"
                 type="text"
@@ -182,13 +283,9 @@ export function SellerPets() {
                 aria-invalid={Boolean(errors.breed)}
                 className={fieldClassName(Boolean(errors.breed))}
               />
-              {errors.breed && <p className="mt-1.5 text-sm text-error">{errors.breed}</p>}
-            </div>
+            </Field>
 
-            <div>
-              <label htmlFor="age_months" className="block text-sm text-ink">
-                Age (months)
-              </label>
+            <Field label="Age (months)" htmlFor="age_months" error={errors.age_months}>
               <input
                 id="age_months"
                 type="number"
@@ -198,13 +295,9 @@ export function SellerPets() {
                 aria-invalid={Boolean(errors.age_months)}
                 className={fieldClassName(Boolean(errors.age_months))}
               />
-              {errors.age_months && <p className="mt-1.5 text-sm text-error">{errors.age_months}</p>}
-            </div>
+            </Field>
 
-            <div>
-              <label htmlFor="price" className="block text-sm text-ink">
-                Price
-              </label>
+            <Field label="Price (INR)" htmlFor="price" error={errors.price}>
               <input
                 id="price"
                 type="number"
@@ -215,14 +308,10 @@ export function SellerPets() {
                 aria-invalid={Boolean(errors.price)}
                 className={fieldClassName(Boolean(errors.price))}
               />
-              {errors.price && <p className="mt-1.5 text-sm text-error">{errors.price}</p>}
-            </div>
+            </Field>
           </div>
 
-          <div>
-            <label htmlFor="description" className="block text-sm text-ink">
-              Description
-            </label>
+          <Field label="Description" htmlFor="description">
             <textarea
               id="description"
               rows={3}
@@ -230,12 +319,9 @@ export function SellerPets() {
               onChange={(event) => updateField("description", event.target.value)}
               className={fieldClassName(false)}
             />
-          </div>
+          </Field>
 
-          <div>
-            <label htmlFor="photo_urls" className="block text-sm text-ink">
-              Photo URLs
-            </label>
+          <Field label="Photo URLs" htmlFor="photo_urls" hint="Separate multiple URLs with commas.">
             <input
               id="photo_urls"
               type="text"
@@ -244,21 +330,30 @@ export function SellerPets() {
               onChange={(event) => updateField("photo_urls", event.target.value)}
               className={fieldClassName(false)}
             />
-            <p className="mt-1.5 text-xs text-ink-soft">Separate multiple URLs with commas.</p>
-          </div>
+          </Field>
 
-          {formError && <p className="text-sm text-error">{formError}</p>}
+          {formError && (
+            <p role="alert" className="text-sm text-error">
+              {formError}
+            </p>
+          )}
 
           <Button type="submit" variant="accent" size="md" disabled={submitting} className="sm:w-auto">
-            {submitting ? "Adding…" : "Add pet"}
+            {submitting ? "Saving…" : editingId ? "Save changes" : "Add pet"}
           </Button>
         </form>
       )}
 
-      {loading ? (
+      {actionError && (
+        <p role="alert" className="mt-6 text-sm text-error">
+          {actionError}
+        </p>
+      )}
+
+      {shopLoading || loading ? (
         <p className="mt-8 text-[15px] text-ink-soft">Loading…</p>
       ) : error ? (
-        <p className="mt-8 text-sm text-error">{error}</p>
+        <p className="mt-8 text-sm text-error">Couldn't load your pets: {error}</p>
       ) : pets.length === 0 && !formOpen ? (
         <div className="mt-8">
           <EmptyState title="No pets listed yet" description="Add your first pet to start reaching customers." />
@@ -266,24 +361,61 @@ export function SellerPets() {
       ) : pets.length > 0 ? (
         <div className="mt-8 divide-y divide-border rounded-xl border border-border bg-surface">
           {pets.map((pet) => (
-            <div key={pet.id} className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
-              <div>
+            <div key={pet.id} className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-5 py-4">
+              <div className="min-w-0 flex-1 basis-56">
                 <p className="text-[15px] font-medium text-ink">
+                  {pet.name && (
+                    <>
+                      <span className="font-semibold">{pet.name}</span> <span className="text-ink-soft">&middot;</span>{" "}
+                    </>
+                  )}
                   {pet.breed} <span className="text-ink-soft">({pet.species})</span>
                 </p>
-                <p className="text-sm text-ink-soft">{pet.age_months} months old</p>
+                <p className="text-sm text-ink-soft">
+                  {[pet.gender, `${pet.age_months} months old`].filter(Boolean).join(" · ")}
+                </p>
               </div>
               <p className="text-[15px] font-medium text-accent">{formatPrice(pet.price)}</p>
-              <p className={`text-sm font-medium capitalize ${statusStyles[pet.status] ?? "text-ink-soft"}`}>
-                {pet.status}
-              </p>
-              <div className="flex items-center gap-3">
+              <StatusBadge status={BADGE_STATUS[pet.status] ?? pet.status} label={STATUS_LABELS[pet.status]} />
+              <div className="flex flex-wrap items-center gap-2">
                 {pet.status === "available" && (
-                  <Button type="button" variant="outline" size="sm" onClick={() => markSold(pet.id)}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={busyId === pet.id}
+                    onClick={() => changeStatus(pet.id, "sold")}
+                  >
                     Mark sold
                   </Button>
                 )}
-                <Button type="button" variant="ghost" size="sm" onClick={() => deletePet(pet.id)}>
+                {pet.status === "reserved" && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={busyId === pet.id}
+                    onClick={() => changeStatus(pet.id, "available")}
+                  >
+                    Mark available
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={busyId === pet.id}
+                  onClick={() => openEditForm(pet)}
+                >
+                  Edit
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={busyId === pet.id}
+                  onClick={() => deletePet(pet.id)}
+                >
                   Delete
                 </Button>
               </div>

@@ -4,7 +4,8 @@ import { PawMark } from "./PawMark";
 const footerLinks = [
   { to: "/pets", label: "Shop pets" },
   { to: "/sellers", label: "Shops" },
-  { to: "/for-store-owners", label: "Sell on PETSTA" },
+  { to: "/services", label: "Services" },
+  { to: "/health", label: "Health" },
 ];
 
 export function Footer() {

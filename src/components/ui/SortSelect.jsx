@@ -2,6 +2,7 @@ const options = [
   { value: "newest", label: "Just listed" },
   { value: "price-asc", label: "Price: low to high" },
   { value: "price-desc", label: "Price: high to low" },
+  { value: "age-asc", label: "Age: youngest first" },
 ];
 
 export function SortSelect({ value, onChange }) {

@@ -1,17 +1,16 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { Container } from "../components/layout/Container";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Field } from "../components/ui/FormField";
+import { LoginPrompt } from "../components/ui/LoginPrompt";
+import { PRODUCT_PUBLIC_COLUMNS } from "../lib/columns";
 import { formatPrice } from "../lib/format";
+import { fieldClassName } from "../lib/styles";
 import { supabase } from "../lib/supabaseClient";
 import { useAuthStore } from "../store/authStore";
 
-function fieldClassName(hasError) {
-  return `mt-1.5 w-full rounded-lg border bg-surface px-4 py-2.5 text-[15px] text-ink focus:outline-none ${
-    hasError ? "border-error focus:border-error" : "border-border focus:border-primary"
-  }`;
-}
+const GRID_CLASS = "mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3";
 
 function GiftForm({ product, session, onDone }) {
   const [recipientName, setRecipientName] = useState("");
@@ -78,7 +77,7 @@ function GiftForm({ product, session, onDone }) {
   if (sent) {
     return (
       <div className="mt-3 rounded-lg border border-border bg-paper p-3 text-sm text-trust">
-        Gift order placed for {recipientName} — pick up and pay at the shop.
+        Gift order placed for {recipientName} — the shop will confirm pickup details with you.
       </div>
     );
   }
@@ -89,10 +88,7 @@ function GiftForm({ product, session, onDone }) {
       noValidate
       className="mt-3 flex flex-col gap-3 rounded-lg border border-border bg-paper p-3"
     >
-      <div>
-        <label htmlFor={`name-${product.id}`} className="block text-sm text-ink">
-          Recipient name
-        </label>
+      <Field label="Recipient name" htmlFor={`name-${product.id}`} error={errors.recipientName}>
         <input
           id={`name-${product.id}`}
           type="text"
@@ -101,13 +97,9 @@ function GiftForm({ product, session, onDone }) {
           aria-invalid={Boolean(errors.recipientName)}
           className={fieldClassName(Boolean(errors.recipientName))}
         />
-        {errors.recipientName && <p className="mt-1.5 text-sm text-error">{errors.recipientName}</p>}
-      </div>
+      </Field>
 
-      <div>
-        <label htmlFor={`contact-${product.id}`} className="block text-sm text-ink">
-          Recipient phone or email
-        </label>
+      <Field label="Recipient phone or email" htmlFor={`contact-${product.id}`} error={errors.recipientContact}>
         <input
           id={`contact-${product.id}`}
           type="text"
@@ -116,15 +108,9 @@ function GiftForm({ product, session, onDone }) {
           aria-invalid={Boolean(errors.recipientContact)}
           className={fieldClassName(Boolean(errors.recipientContact))}
         />
-        {errors.recipientContact && (
-          <p className="mt-1.5 text-sm text-error">{errors.recipientContact}</p>
-        )}
-      </div>
+      </Field>
 
-      <div>
-        <label htmlFor={`message-${product.id}`} className="block text-sm text-ink">
-          Message (optional)
-        </label>
+      <Field label="Message" htmlFor={`message-${product.id}`} optional>
         <textarea
           id={`message-${product.id}`}
           rows={2}
@@ -132,7 +118,7 @@ function GiftForm({ product, session, onDone }) {
           onChange={(event) => setMessage(event.target.value)}
           className={fieldClassName(false)}
         />
-      </div>
+      </Field>
 
       {formError && <p className="text-sm text-error">{formError}</p>}
 
@@ -148,23 +134,37 @@ function GiftForm({ product, session, onDone }) {
   );
 }
 
+function GiftCardSkeleton() {
+  return (
+    <div aria-hidden="true" className="animate-pulse rounded-xl border border-border bg-surface p-4">
+      <div className="h-3 w-1/4 rounded bg-border/50" />
+      <div className="mt-2 h-4 w-3/4 rounded bg-border/50" />
+      <div className="mt-2 h-3.5 w-1/2 rounded bg-border/50" />
+      <div className="mt-3 h-5 w-1/3 rounded bg-border/50" />
+      <div className="mt-3 h-9 rounded-lg bg-border/50" />
+    </div>
+  );
+}
+
 export function Gifting() {
   const session = useAuthStore((state) => state.session);
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
   const [activeProductId, setActiveProductId] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
     async function loadProducts() {
       setLoading(true);
-      const { data, error } = await supabase
+      setError("");
+      const { data, error: queryError } = await supabase
         .from("products")
-        .select("*, shops(name)")
+        .select(`${PRODUCT_PUBLIC_COLUMNS}, shops(name)`)
         .eq("status", "available");
       if (cancelled) return;
-      if (error) setError(error.message);
+      if (queryError) setError(queryError.message || "Couldn't load products.");
       else setProducts(data ?? []);
       setLoading(false);
     }
@@ -172,15 +172,7 @@ export function Gifting() {
     return () => {
       cancelled = true;
     };
-  }, []);
-
-  if (loading) {
-    return (
-      <Container className="py-16">
-        <p className="text-ink-soft">Loading…</p>
-      </Container>
-    );
-  }
+  }, [attempt]);
 
   return (
     <Container className="py-10 lg:py-12">
@@ -189,10 +181,24 @@ export function Gifting() {
         Pick something from the store and send it to someone else — they pick it up at the shop.
       </p>
 
-      {error && <p className="mt-6 text-sm text-error">{error}</p>}
-
-      {products.length > 0 ? (
-        <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {loading ? (
+        <div className={GRID_CLASS} role="status" aria-label="Loading products">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <GiftCardSkeleton key={index} />
+          ))}
+        </div>
+      ) : error ? (
+        <EmptyState
+          title="We couldn't load gift ideas"
+          description={error}
+          action={
+            <Button size="sm" onClick={() => setAttempt((count) => count + 1)}>
+              Try again
+            </Button>
+          }
+        />
+      ) : products.length > 0 ? (
+        <div className={GRID_CLASS}>
           {products.map((product) => (
             <div key={product.id} className="rounded-xl border border-border bg-surface p-4">
               <p className="text-xs capitalize text-ink-soft">{product.category}</p>
@@ -206,11 +212,8 @@ export function Gifting() {
                 session ? (
                   <GiftForm product={product} session={session} onDone={() => setActiveProductId(null)} />
                 ) : (
-                  <div className="mt-3 rounded-lg border border-border bg-paper p-3 text-sm text-ink-soft">
-                    <Link to="/login" className="text-primary hover:underline">
-                      Log in
-                    </Link>{" "}
-                    to send this as a gift.
+                  <div className="mt-3 rounded-lg border border-border bg-paper p-3">
+                    <LoginPrompt compact description="to send this as a gift." />
                   </div>
                 )
               ) : (

@@ -1,138 +1,210 @@
-import { Check, CheckCircle, CreditCard, DeviceMobile } from "@phosphor-icons/react";
-import { useState } from "react";
+import { CheckCircle, Trash } from "@phosphor-icons/react";
+import { useEffect, useState } from "react";
 import { Container } from "../components/layout/Container";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
+import { LoginPrompt } from "../components/ui/LoginPrompt";
 import { PetPhoto } from "../components/ui/PetPhoto";
-import { getPetById } from "../data/pets";
-import { getShopById } from "../data/shops";
-import { formatOrderDate, formatPrice } from "../lib/format";
+import { formatPrice } from "../lib/format";
+import { supabase } from "../lib/supabaseClient";
+import { useAuthStore } from "../store/authStore";
 import { useCartStore } from "../store/cartStore";
-
-const STEPS = [
-  { id: 1, label: "Details" },
-  { id: 2, label: "Payment" },
-  { id: 3, label: "Review" },
-];
-
-function validateBuyer(buyer) {
-  const errors = {};
-  if (!buyer.name.trim()) errors.name = "Enter your name.";
-  if (!buyer.email.trim()) errors.email = "Enter an email address.";
-  else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(buyer.email.trim())) {
-    errors.email = "Enter a valid email address.";
-  }
-  if (!buyer.phone.trim()) errors.phone = "Enter a phone number.";
-  else if (!/^[\d\s()+-]{7,}$/.test(buyer.phone.trim())) errors.phone = "Enter a valid phone number.";
-  return errors;
-}
-
-function fieldClassName(hasError) {
-  return `mt-1.5 w-full rounded-lg border bg-surface px-4 py-2.5 text-[15px] text-ink focus:outline-none ${
-    hasError ? "border-error focus:border-error" : "border-border focus:border-primary"
-  }`;
-}
-
-function Stepper({ current }) {
-  return (
-    <ol className="flex items-center gap-3">
-      {STEPS.map((step, index) => (
-        <li key={step.id} className="flex items-center gap-3">
-          <span
-            className={`flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium ${
-              step.id < current
-                ? "bg-trust text-white"
-                : step.id === current
-                  ? "bg-primary text-white"
-                  : "bg-border/50 text-ink-soft"
-            }`}
-          >
-            {step.id < current ? <Check size={16} weight="bold" /> : step.id}
-          </span>
-          <span className={`text-sm ${step.id === current ? "font-medium text-ink" : "text-ink-soft"}`}>
-            {step.label}
-          </span>
-          {index < STEPS.length - 1 && <span className="mx-1 h-px w-8 bg-border sm:w-16" />}
-        </li>
-      ))}
-    </ol>
-  );
-}
+import { useCatalog, useCatalogStore } from "../store/catalogStore";
 
 /**
  * A pet's shop is fixed, never a buyer choice — "pickup shop confirmation
- * per item" means showing which shop each item comes from, not letting the
- * buyer pick one.
+ * per item" means showing which shop each pet comes from. Only the shop's
+ * name is shown; pickup details are confirmed by the shop after booking.
  */
-function PickupList({ items }) {
+function PetRow({ pet, shopName, onRemove }) {
   return (
-    <ul className="mt-4 divide-y divide-border rounded-xl border border-border">
-      {items.map((pet) => {
-        const shop = getShopById(pet.shopId);
-        return (
-          <li key={pet.id} className="flex items-center gap-3 p-3">
-            <div className="h-12 w-12 flex-none overflow-hidden rounded-lg">
-              <PetPhoto src={pet.photos?.[0]} species={pet.species} alt="" className="h-full w-full" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-ink">{pet.name}</p>
-              <p className="truncate text-xs text-ink-soft">Pickup at {shop?.name}</p>
-            </div>
-            <p className="flex-none text-sm font-semibold text-accent">{formatPrice(pet.price)}</p>
-          </li>
-        );
-      })}
-    </ul>
+    <li className="flex items-center gap-3 p-3">
+      <div className="h-14 w-14 flex-none overflow-hidden rounded-lg">
+        <PetPhoto src={pet.photos?.[0]} species={pet.species} alt="" className="h-full w-full" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium text-ink">{pet.name}</p>
+        {shopName && <p className="truncate text-xs text-ink-soft">Pickup at {shopName}</p>}
+      </div>
+      <p className="flex-none text-sm font-semibold text-accent">{formatPrice(pet.price)}</p>
+      {onRemove && (
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label={`Remove ${pet.name} from cart`}
+          className="h-8 w-8 flex-none rounded-full text-ink-soft hover:bg-error/10 hover:text-error"
+        >
+          <Trash size={17} className="mx-auto" />
+        </button>
+      )}
+    </li>
+  );
+}
+
+/** Re-fetches the listings, then drops cart pets that are no longer available. Returns how many were removed. */
+async function refreshCatalogAndPruneCart(pruneCart) {
+  await useCatalogStore.getState().load({ force: true });
+  const { status, pets } = useCatalogStore.getState();
+  return status === "ready" ? pruneCart(pets.map((pet) => pet.id)) : 0;
+}
+
+function PageMessage({ children }) {
+  return (
+    <Container className="py-16">
+      <p className="text-ink-soft">{children}</p>
+    </Container>
   );
 }
 
 export function Checkout() {
+  const authStatus = useAuthStore((state) => state.status);
+  const session = useAuthStore((state) => state.session);
+  const profile = useAuthStore((state) => state.profile);
   const itemIds = useCartStore((state) => state.items);
+  const removeFromCart = useCartStore((state) => state.removeFromCart);
   const clearCart = useCartStore((state) => state.clearCart);
-  const items = itemIds.map((id) => getPetById(id)).filter(Boolean);
-  const subtotal = items.reduce((sum, pet) => sum + pet.price, 0);
+  const pruneCart = useCartStore((state) => state.pruneCart);
+  const { getPetById, getShopById, loading, error } = useCatalog();
 
-  const [step, setStep] = useState(1);
-  const [buyer, setBuyer] = useState({ name: "", email: "", phone: "" });
-  const [errors, setErrors] = useState({});
-  const [paymentMethod, setPaymentMethod] = useState("card");
-  const [order, setOrder] = useState(null);
+  const [refreshed, setRefreshed] = useState(false);
+  const [removedCount, setRemovedCount] = useState(0);
+  const [placing, setPlacing] = useState(false);
+  const [placeError, setPlaceError] = useState("");
+  const [placed, setPlaced] = useState(null); // { orderId, total, lines: [{ pet, shopName }] }
 
-  function updateBuyerField(field, value) {
-    setBuyer((prev) => ({ ...prev, [field]: value }));
+  // A cart can be days old: re-check availability against fresh listings before showing it, and
+  // let sold, reserved or deleted pets drop out.
+  useEffect(() => {
+    let cancelled = false;
+    refreshCatalogAndPruneCart(pruneCart).then((removed) => {
+      if (cancelled) return;
+      if (removed > 0) setRemovedCount((count) => count + removed);
+      setRefreshed(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [pruneCart]);
+
+  async function handleRetry() {
+    const removed = await refreshCatalogAndPruneCart(pruneCart);
+    if (removed > 0) setRemovedCount((count) => count + removed);
   }
 
-  function handleContinueFromDetails() {
-    const validationErrors = validateBuyer(buyer);
-    setErrors(validationErrors);
-    if (Object.keys(validationErrors).length > 0) return;
-    setStep(2);
-  }
-
-  function handlePlaceOrder() {
-    // No network call: the "order" is just a local snapshot for the
-    // confirmation screen, created before clearCart() empties the cart.
-    setOrder({
-      id: `PN-${Date.now().toString(36).toUpperCase()}`,
-      items,
-      subtotal,
-      buyer,
-      paymentMethod,
-      placedAt: new Date().toISOString(),
+  async function handlePlaceOrder(items) {
+    if (placing || items.length === 0) return;
+    setPlacing(true);
+    setPlaceError("");
+    const { data: orderId, error: rpcError } = await supabase.rpc("place_pet_order", {
+      p_pet_ids: items.map((pet) => pet.id),
+    });
+    setPlacing(false);
+    if (rpcError) {
+      setPlaceError(rpcError.message || "We couldn't place your reservation. Please try again.");
+      return;
+    }
+    setPlaced({
+      orderId: String(orderId),
+      total: items.reduce((sum, pet) => sum + pet.price, 0),
+      lines: items.map((pet) => ({ pet, shopName: getShopById(pet.shopId)?.name })),
     });
     clearCart();
-    setStep("confirmed");
+    // The reserved pets are no longer "available": refresh the listings behind us.
+    useCatalogStore.getState().load({ force: true });
   }
 
-  if (step !== "confirmed" && items.length === 0) {
+  if (placed) {
+    return (
+      <Container className="py-16">
+        <div className="mx-auto max-w-xl text-center">
+          <CheckCircle size={48} weight="fill" className="mx-auto text-trust" />
+          <h1 className="mt-5 font-display text-3xl font-bold text-ink">Reservation confirmed</h1>
+          <p className="mt-3 text-[15px] text-ink-soft">
+            Your pets are reserved. The shop will confirm pickup details with you; payment happens in person.
+          </p>
+
+          <div className="mt-8 rounded-xl border border-border bg-surface p-6 text-left">
+            <div className="flex items-start justify-between gap-4 text-sm">
+              <span className="text-ink-soft">Order</span>
+              <span className="break-all text-right font-mono text-xs text-ink">{placed.orderId}</span>
+            </div>
+            <ul className="mt-4 divide-y divide-border rounded-xl border border-border">
+              {placed.lines.map(({ pet, shopName }) => (
+                <PetRow key={pet.id} pet={pet} shopName={shopName} />
+              ))}
+            </ul>
+            <div className="mt-4 flex items-center justify-between border-t border-border pt-4 text-[15px]">
+              <span className="text-ink-soft">Amount due at pickup</span>
+              <span className="font-display font-semibold text-ink">{formatPrice(placed.total)}</span>
+            </div>
+          </div>
+
+          <div className="mt-8 flex flex-wrap justify-center gap-3">
+            <Button to="/account/orders">View my orders</Button>
+            <Button to="/pets" variant="outline">
+              Continue shopping
+            </Button>
+          </div>
+        </div>
+      </Container>
+    );
+  }
+
+  if (authStatus === "loading") return <PageMessage>Loading…</PageMessage>;
+
+  if (!session) {
+    return (
+      <Container className="py-16">
+        <LoginPrompt
+          title="Log in to reserve your pets"
+          description="Sign in to confirm your reservation. Your cart will be waiting for you."
+        />
+      </Container>
+    );
+  }
+
+  const emptyCart = (
+    <Container className="py-20">
+      <EmptyState
+        title="Your cart is empty"
+        description={
+          removedCount > 0
+            ? "The pets in your cart are no longer available, so they were removed."
+            : "Add a pet to your cart before checking out."
+        }
+        action={
+          <Button to="/pets" size="sm">
+            Shop pets
+          </Button>
+        }
+      />
+    </Container>
+  );
+
+  if (itemIds.length === 0) return emptyCart;
+
+  if (loading || !refreshed) {
+    return (
+      <Container className="py-10 lg:py-12">
+        <h1 className="font-display text-3xl font-bold text-ink md:text-4xl">Checkout</h1>
+        <div role="status" aria-label="Checking availability" className="mt-8 max-w-xl animate-pulse space-y-3">
+          {itemIds.map((id) => (
+            <div key={id} className="h-20 rounded-xl bg-border/50" />
+          ))}
+        </div>
+      </Container>
+    );
+  }
+
+  if (error) {
     return (
       <Container className="py-20">
         <EmptyState
-          title="Your cart is empty"
-          description="Add a pet to your cart before checking out."
+          title="We couldn't check your pets"
+          description={error}
           action={
-            <Button to="/pets" size="sm">
-              Shop pets
+            <Button size="sm" onClick={handleRetry}>
+              Try again
             </Button>
           }
         />
@@ -140,191 +212,49 @@ export function Checkout() {
     );
   }
 
-  if (step === "confirmed" && order) {
-    return (
-      <Container className="py-16">
-        <div className="mx-auto max-w-xl text-center">
-          <CheckCircle size={48} weight="fill" className="mx-auto text-trust" />
-          <h1 className="mt-5 font-display text-3xl font-bold text-ink">Order placed</h1>
-          <p className="mt-3 text-[15px] text-ink-soft">
-            Order <span className="font-medium text-ink">#{order.id}</span> is placed and pending pickup.
-            No payment has been charged — you'll pay in person when you collect each pet from its shop.
-          </p>
+  const items = itemIds.map((id) => getPetById(id)).filter(Boolean);
+  if (items.length === 0) return emptyCart;
 
-          <div className="mt-8 rounded-xl border border-border bg-surface p-6 text-left">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-ink-soft">Placed</span>
-              <span className="text-ink">{formatOrderDate(order.placedAt)}</span>
-            </div>
-            <div className="mt-2 flex items-center justify-between text-sm">
-              <span className="text-ink-soft">Confirmation sent to</span>
-              <span className="text-ink">{order.buyer.email}</span>
-            </div>
-            <div className="mt-4 border-t border-border pt-4">
-              <PickupList items={order.items} />
-            </div>
-            <div className="mt-4 flex items-center justify-between border-t border-border pt-4 text-[15px]">
-              <span className="text-ink-soft">Amount due at pickup</span>
-              <span className="font-display font-semibold text-ink">{formatPrice(order.subtotal)}</span>
-            </div>
-          </div>
-
-          <Button to="/pets" className="mt-8">
-            Continue shopping
-          </Button>
-        </div>
-      </Container>
-    );
-  }
+  const total = items.reduce((sum, pet) => sum + pet.price, 0);
 
   return (
     <Container className="py-10 lg:py-12">
       <h1 className="font-display text-3xl font-bold text-ink md:text-4xl">Checkout</h1>
-      <div className="mt-6 overflow-x-auto">
-        <Stepper current={step} />
-      </div>
+      <p className="mt-2 text-[15px] text-ink-soft">
+        Reserve your pets now, then pick them up and pay in person at each shop. Nothing is charged online.
+      </p>
+
+      {removedCount > 0 && (
+        <p role="status" className="mt-6 rounded-lg border border-border bg-surface px-4 py-3 text-sm text-ink-soft">
+          {removedCount === 1
+            ? "1 pet in your cart is no longer available and was removed."
+            : `${removedCount} pets in your cart are no longer available and were removed.`}
+        </p>
+      )}
 
       <div className="mt-8 grid gap-10 lg:grid-cols-[1fr_360px] lg:gap-14">
-        <div className="max-w-xl">
-          {step === 1 && (
-            <div>
-              <h2 className="font-display text-lg font-semibold text-ink">Your details</h2>
-              <p className="mt-1 text-sm text-ink-soft">
-                No shipping address needed — these pets don't ship. You'll pick each one up in person.
-              </p>
+        <div>
+          <h2 className="font-display text-lg font-semibold text-ink">Pets to reserve</h2>
+          <ul className="mt-4 divide-y divide-border rounded-xl border border-border bg-surface">
+            {items.map((pet) => (
+              <PetRow
+                key={pet.id}
+                pet={pet}
+                shopName={getShopById(pet.shopId)?.name}
+                onRemove={() => removeFromCart(pet.id)}
+              />
+            ))}
+          </ul>
+          <p className="mt-3 text-sm text-ink-soft">
+            Each pet is collected from its own shop. The shop will confirm pickup details with you after you
+            reserve.
+          </p>
 
-              <div className="mt-5 flex flex-col gap-5">
-                <div>
-                  <label htmlFor="buyerName" className="block text-sm text-ink">
-                    Full name
-                  </label>
-                  <input
-                    id="buyerName"
-                    type="text"
-                    autoComplete="name"
-                    value={buyer.name}
-                    onChange={(event) => updateBuyerField("name", event.target.value)}
-                    aria-invalid={Boolean(errors.name)}
-                    className={fieldClassName(Boolean(errors.name))}
-                  />
-                  {errors.name && <p className="mt-1.5 text-sm text-error">{errors.name}</p>}
-                </div>
-                <div>
-                  <label htmlFor="buyerEmail" className="block text-sm text-ink">
-                    Email address
-                  </label>
-                  <input
-                    id="buyerEmail"
-                    type="email"
-                    autoComplete="email"
-                    value={buyer.email}
-                    onChange={(event) => updateBuyerField("email", event.target.value)}
-                    aria-invalid={Boolean(errors.email)}
-                    className={fieldClassName(Boolean(errors.email))}
-                  />
-                  {errors.email && <p className="mt-1.5 text-sm text-error">{errors.email}</p>}
-                </div>
-                <div>
-                  <label htmlFor="buyerPhone" className="block text-sm text-ink">
-                    Phone number
-                  </label>
-                  <input
-                    id="buyerPhone"
-                    type="tel"
-                    autoComplete="tel"
-                    value={buyer.phone}
-                    onChange={(event) => updateBuyerField("phone", event.target.value)}
-                    aria-invalid={Boolean(errors.phone)}
-                    className={fieldClassName(Boolean(errors.phone))}
-                  />
-                  {errors.phone && <p className="mt-1.5 text-sm text-error">{errors.phone}</p>}
-                </div>
-              </div>
-
-              <h2 className="mt-8 font-display text-lg font-semibold text-ink">Pickup by shop</h2>
-              <PickupList items={items} />
-
-              <Button variant="accent" size="lg" onClick={handleContinueFromDetails} className="mt-6 w-full">
-                Continue to payment
-              </Button>
-            </div>
-          )}
-
-          {step === 2 && (
-            <div>
-              <h2 className="font-display text-lg font-semibold text-ink">Payment method</h2>
-              <p className="mt-1 text-sm text-ink-soft">
-                Choose how you'll pay at pickup. Nothing is charged now, and no payment details are
-                collected on this site.
-              </p>
-
-              <div className="mt-5 flex flex-col gap-3">
-                {[
-                  { value: "card", label: "Card", icon: CreditCard },
-                  { value: "upi", label: "UPI", icon: DeviceMobile },
-                ].map((option) => (
-                  <label
-                    key={option.value}
-                    className={`flex cursor-pointer items-center gap-3 rounded-lg border px-4 py-3.5 transition-colors ${
-                      paymentMethod === option.value ? "border-primary bg-primary/5" : "border-border"
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="paymentMethod"
-                      value={option.value}
-                      checked={paymentMethod === option.value}
-                      onChange={() => setPaymentMethod(option.value)}
-                      className="h-4 w-4 accent-primary"
-                    />
-                    <option.icon size={20} className="text-ink-soft" />
-                    <span className="text-[15px] text-ink">{option.label}</span>
-                  </label>
-                ))}
-              </div>
-
-              <div className="mt-6 flex gap-3">
-                <Button variant="outline" size="lg" onClick={() => setStep(1)}>
-                  Back
-                </Button>
-                <Button variant="accent" size="lg" onClick={() => setStep(3)} className="flex-1">
-                  Continue to review
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {step === 3 && (
-            <div>
-              <h2 className="font-display text-lg font-semibold text-ink">Review your order</h2>
-
-              <div className="mt-4 rounded-xl border border-border bg-surface p-5">
-                <p className="text-sm font-medium text-ink">Buyer</p>
-                <p className="mt-1 text-sm text-ink-soft">
-                  {buyer.name} · {buyer.email} · {buyer.phone}
-                </p>
-              </div>
-
-              <div className="mt-4 rounded-xl border border-border bg-surface p-5">
-                <p className="text-sm font-medium text-ink">Payment method</p>
-                <p className="mt-1 text-sm text-ink-soft">
-                  {paymentMethod === "card" ? "Card" : "UPI"} — paid in person at pickup, not charged here.
-                </p>
-              </div>
-
-              <h3 className="mt-6 text-sm font-medium text-ink">Items</h3>
-              <PickupList items={items} />
-
-              <div className="mt-4 flex gap-3">
-                <Button variant="outline" size="lg" onClick={() => setStep(2)}>
-                  Back
-                </Button>
-                <Button variant="accent" size="lg" onClick={handlePlaceOrder} className="flex-1">
-                  Place order
-                </Button>
-              </div>
-            </div>
-          )}
+          <h2 className="mt-8 font-display text-lg font-semibold text-ink">Reserving as</h2>
+          <p className="mt-1 text-sm text-ink-soft">
+            {profile?.name ? `${profile.name} · ` : ""}
+            {profile?.email ?? session.user.email}
+          </p>
         </div>
 
         <div className="h-fit rounded-xl border border-border bg-surface p-5">
@@ -338,10 +268,25 @@ export function Checkout() {
             ))}
           </ul>
           <div className="mt-3 flex items-center justify-between border-t border-border pt-3 text-[15px]">
-            <span className="text-ink-soft">Subtotal</span>
-            <span className="font-display font-semibold text-ink">{formatPrice(subtotal)}</span>
+            <span className="text-ink-soft">Total</span>
+            <span className="font-display font-semibold text-ink">{formatPrice(total)}</span>
           </div>
           <p className="mt-2 text-xs text-ink-soft">Due at pickup — nothing is charged online.</p>
+
+          {placeError && (
+            <p role="alert" className="mt-4 text-sm text-error">
+              {placeError}
+            </p>
+          )}
+          <Button
+            variant="accent"
+            size="lg"
+            onClick={() => handlePlaceOrder(items)}
+            disabled={placing}
+            className="mt-4 w-full"
+          >
+            {placing ? "Reserving…" : "Confirm reservation"}
+          </Button>
         </div>
       </div>
     </Container>

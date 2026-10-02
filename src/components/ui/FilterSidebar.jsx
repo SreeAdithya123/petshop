@@ -1,8 +1,7 @@
 import { X } from "@phosphor-icons/react";
-import { breedList, speciesList } from "../../data/pets";
-import { shops } from "../../data/shops";
 
 function CheckboxGroup({ legend, options, selected, onToggle }) {
+  if (options.length === 0) return null;
   return (
     <fieldset className="border-t border-border py-6 first:border-t-0 first:pt-0">
       <legend className="text-[15px] font-medium text-ink">{legend}</legend>
@@ -24,6 +23,9 @@ function CheckboxGroup({ legend, options, selected, onToggle }) {
 }
 
 export function FilterSidebar({
+  speciesList = [],
+  breedList = [],
+  shops = [],
   species,
   shopIds,
   breeds,
@@ -94,14 +96,14 @@ export function FilterSidebar({
           <div className="mt-3 flex items-center gap-3">
             <div className="flex-1">
               <label htmlFor="minPrice" className="block text-xs text-ink-soft">
-                Min
+                Min (₹)
               </label>
               <input
                 id="minPrice"
                 type="number"
                 inputMode="numeric"
                 min="0"
-                placeholder="$0"
+                placeholder="₹0"
                 value={minPrice}
                 onChange={(event) => onPriceChange("minPrice", event.target.value)}
                 className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-soft/60 focus:border-primary focus:outline-none"
@@ -109,14 +111,14 @@ export function FilterSidebar({
             </div>
             <div className="flex-1">
               <label htmlFor="maxPrice" className="block text-xs text-ink-soft">
-                Max
+                Max (₹)
               </label>
               <input
                 id="maxPrice"
                 type="number"
                 inputMode="numeric"
                 min="0"
-                placeholder="$1000"
+                placeholder="₹50,000"
                 value={maxPrice}
                 onChange={(event) => onPriceChange("maxPrice", event.target.value)}
                 className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-soft/60 focus:border-primary focus:outline-none"

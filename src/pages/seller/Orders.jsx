@@ -4,6 +4,7 @@ import { Button } from "../../components/ui/Button";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { useMyShop } from "../../hooks/useMyShop";
 import { supabase } from "../../lib/supabaseClient";
+import { formatPrice } from "../../lib/format";
 
 const orderTypeLabels = {
   product_purchase: "Product purchase",
@@ -28,10 +29,6 @@ function StatusPill({ status }) {
       {status}
     </span>
   );
-}
-
-function formatCurrency(amount) {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount ?? 0);
 }
 
 export function SellerOrders() {
@@ -206,7 +203,7 @@ export function SellerOrders() {
                 <div className="flex flex-col items-end gap-2">
                   <StatusPill status={order.status} />
                   <p className="font-display text-lg font-semibold text-accent">
-                    {formatCurrency(order.total_amount)}
+                    {formatPrice(order.total_amount)}
                   </p>
                 </div>
               </div>
@@ -219,7 +216,7 @@ export function SellerOrders() {
                         {itemNames[item.item_id] || "Item"}{" "}
                         {item.quantity > 1 && <span className="text-ink-soft">&times; {item.quantity}</span>}
                       </span>
-                      <span className="text-ink-soft">{formatCurrency(item.price_at_purchase)}</span>
+                      <span className="text-ink-soft">{formatPrice(item.price_at_purchase)}</span>
                     </li>
                   ))}
                 </ul>

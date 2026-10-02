@@ -16,6 +16,11 @@ export function sortPets(pets, sort) {
       return sorted.sort((a, b) => a.price - b.price);
     case "price-desc":
       return sorted.sort((a, b) => b.price - a.price);
+    case "age-asc":
+      // Pets with no recorded age go last.
+      return sorted.sort(
+        (a, b) => (a.ageMonths ?? Number.MAX_SAFE_INTEGER) - (b.ageMonths ?? Number.MAX_SAFE_INTEGER),
+      );
     case "newest":
     default:
       return sorted.sort((a, b) => new Date(b.listedDate) - new Date(a.listedDate));

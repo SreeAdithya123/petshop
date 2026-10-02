@@ -1,16 +1,15 @@
 import { Trash, X } from "@phosphor-icons/react";
+import { useEffect } from "react";
 import { Link } from "react-router-dom";
-import { getPetById } from "../../data/pets";
-import { getShopById } from "../../data/shops";
 import { formatPrice } from "../../lib/format";
 import { useCartStore } from "../../store/cartStore";
+import { useCatalog } from "../../store/catalogStore";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
 import { PetPhoto } from "../ui/PetPhoto";
 
-function CartLineItem({ pet }) {
+function CartLineItem({ pet, shopName }) {
   const removeFromCart = useCartStore((state) => state.removeFromCart);
-  const shop = getShopById(pet.shopId);
 
   return (
     <li className="flex gap-3 py-4">
@@ -18,7 +17,7 @@ function CartLineItem({ pet }) {
         <PetPhoto
           src={pet.photos?.[0]}
           species={pet.species}
-          alt={`${pet.name}, a ${pet.breed}`}
+          alt={`${pet.name}, a ${pet.breed || pet.species}`}
           className="h-full w-full"
         />
       </Link>
@@ -26,7 +25,7 @@ function CartLineItem({ pet }) {
         <Link to={`/pets/${pet.id}`} className="text-sm font-medium text-ink hover:underline">
           {pet.name}
         </Link>
-        {shop && <p className="text-xs text-ink-soft">Pickup at {shop.name}</p>}
+        {shopName && <p className="text-xs text-ink-soft">Pickup at {shopName}</p>}
         <p className="mt-1 text-sm font-semibold text-accent">{formatPrice(pet.price)}</p>
       </div>
       <button
@@ -41,6 +40,102 @@ function CartLineItem({ pet }) {
   );
 }
 
+function CartLineSkeleton() {
+  return (
+    <li aria-hidden="true" className="flex animate-pulse gap-3 py-4">
+      <div className="h-16 w-16 flex-none rounded-lg bg-border/50" />
+      <div className="flex-1 space-y-2 pt-1">
+        <div className="h-4 w-2/3 rounded bg-border/50" />
+        <div className="h-3 w-1/2 rounded bg-border/50" />
+        <div className="h-4 w-1/4 rounded bg-border/50" />
+      </div>
+    </li>
+  );
+}
+
+function EmptyCart({ onNavigate }) {
+  return (
+    <EmptyState
+      title="Your cart is empty"
+      description="Add a pet to your cart to hold it while you browse."
+      action={
+        <Button to="/pets" size="sm" onClick={onNavigate}>
+          Browse pets
+        </Button>
+      }
+    />
+  );
+}
+
+/**
+ * Cart lines are resolved from the live catalog (the cart only stores pet
+ * ids), and any id the catalog no longer lists — sold, reserved, deleted — is
+ * pruned once the catalog has loaded. Rendered only when the cart has items so
+ * an empty cart never triggers a catalog fetch.
+ */
+function CartContents({ itemIds, onNavigate }) {
+  const { getPetById, getShopById, pets, loading, error, reload } = useCatalog();
+  const pruneCart = useCartStore((state) => state.pruneCart);
+
+  useEffect(() => {
+    if (loading || error) return;
+    pruneCart(pets.map((pet) => pet.id));
+  }, [loading, error, pets, pruneCart]);
+
+  if (loading) {
+    return (
+      <div className="flex-1 overflow-y-auto px-5" role="status" aria-label="Loading your cart">
+        <ul className="divide-y divide-border">
+          {itemIds.map((id) => (
+            <CartLineSkeleton key={id} />
+          ))}
+        </ul>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <EmptyState
+        title="We couldn't load your cart"
+        description={error}
+        action={
+          <Button size="sm" onClick={reload}>
+            Try again
+          </Button>
+        }
+      />
+    );
+  }
+
+  const items = itemIds.map((id) => getPetById(id)).filter(Boolean);
+  if (items.length === 0) return <EmptyCart onNavigate={onNavigate} />;
+
+  const subtotal = items.reduce((sum, pet) => sum + pet.price, 0);
+
+  return (
+    <>
+      <ul className="flex-1 divide-y divide-border overflow-y-auto px-5">
+        {items.map((pet) => (
+          <CartLineItem key={pet.id} pet={pet} shopName={getShopById(pet.shopId)?.name} />
+        ))}
+      </ul>
+      <div className="border-t border-border px-5 py-4">
+        <div className="flex items-center justify-between text-[15px]">
+          <span className="text-ink-soft">Subtotal</span>
+          <span className="font-display font-semibold text-ink">{formatPrice(subtotal)}</span>
+        </div>
+        <p className="mt-1 text-xs text-ink-soft">
+          Pickup and final payment happen at each shop — nothing ships.
+        </p>
+        <Button to="/checkout" variant="accent" size="lg" onClick={onNavigate} className="mt-4 w-full">
+          Proceed to Checkout
+        </Button>
+      </div>
+    </>
+  );
+}
+
 /**
  * Right-side drawer on tablet/desktop, bottom sheet on mobile — one
  * component, two transform axes gated by the `md:` breakpoint (translateY
@@ -51,9 +146,6 @@ export function CartDrawer() {
   const isOpen = useCartStore((state) => state.isDrawerOpen);
   const closeDrawer = useCartStore((state) => state.closeDrawer);
   const itemIds = useCartStore((state) => state.items);
-
-  const items = itemIds.map((id) => getPetById(id)).filter(Boolean);
-  const subtotal = items.reduce((sum, pet) => sum + pet.price, 0);
 
   return (
     <>
@@ -74,7 +166,7 @@ export function CartDrawer() {
       >
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <h2 className="font-display text-lg font-semibold text-ink">
-            Your cart{items.length > 0 ? ` (${items.length})` : ""}
+            Your cart{itemIds.length > 0 ? ` (${itemIds.length})` : ""}
           </h2>
           <button
             type="button"
@@ -86,42 +178,10 @@ export function CartDrawer() {
           </button>
         </div>
 
-        {items.length === 0 ? (
-          <EmptyState
-            title="Your cart is empty"
-            description="Add a pet to your cart to hold it while you browse."
-            action={
-              <Button to="/pets" size="sm" onClick={closeDrawer}>
-                Browse pets
-              </Button>
-            }
-          />
+        {itemIds.length === 0 ? (
+          <EmptyCart onNavigate={closeDrawer} />
         ) : (
-          <>
-            <ul className="flex-1 divide-y divide-border overflow-y-auto px-5">
-              {items.map((pet) => (
-                <CartLineItem key={pet.id} pet={pet} />
-              ))}
-            </ul>
-            <div className="border-t border-border px-5 py-4">
-              <div className="flex items-center justify-between text-[15px]">
-                <span className="text-ink-soft">Subtotal</span>
-                <span className="font-display font-semibold text-ink">{formatPrice(subtotal)}</span>
-              </div>
-              <p className="mt-1 text-xs text-ink-soft">
-                Pickup and final payment happen at each shop — nothing ships.
-              </p>
-              <Button
-                to="/checkout"
-                variant="accent"
-                size="lg"
-                onClick={closeDrawer}
-                className="mt-4 w-full"
-              >
-                Proceed to Checkout
-              </Button>
-            </div>
-          </>
+          <CartContents itemIds={itemIds} onNavigate={closeDrawer} />
         )}
       </aside>
     </>

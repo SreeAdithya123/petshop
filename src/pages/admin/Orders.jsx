@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabaseClient";
 import { Container } from "../../components/layout/Container";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { formatPrice } from "../../lib/format";
 
 const STATUS_OPTIONS = ["all", "pending", "paid", "fulfilled", "cancelled"];
 
@@ -11,10 +12,6 @@ const STATUS_STYLES = {
   pending: "text-ink-soft",
   cancelled: "text-error",
 };
-
-function formatCurrency(amount) {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount ?? 0);
-}
 
 function formatDate(value) {
   return new Date(value).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
@@ -82,7 +79,7 @@ export function AdminOrders() {
             <li key={order.id} className="flex flex-col gap-2 p-5 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="font-display font-semibold text-ink">
-                  {order.order_type.replace("_", " ")} · {formatCurrency(order.total_amount)}
+                  {order.order_type.replace("_", " ")} · {formatPrice(order.total_amount)}
                 </div>
                 <div className="mt-1 text-sm text-ink-soft">
                   {order.profiles?.name ?? "Unknown customer"}
