@@ -1,3 +1,4 @@
+import '../data/columns.dart';
 import '../models/models.dart';
 import '../services/supabase_service.dart';
 
@@ -20,9 +21,17 @@ class ShopsRepository {
     return row != null ? Shop.fromJson(row) : null;
   }
 
+  /// Customer-facing: public columns only (no address/phone).
   Future<List<Shop>> listApproved() async {
-    final rows = await _table.select().eq('status', 'approved').order('created_at', ascending: false);
+    final rows =
+        await _table.select(shopPublicColumns).eq('status', 'approved').order('created_at', ascending: false);
     return (rows as List).map((r) => Shop.fromJson(r)).toList();
+  }
+
+  /// Customer-facing: public columns only (no address/phone).
+  Future<Shop?> getPublicById(String id) async {
+    final row = await _table.select(shopPublicColumns).eq('id', id).maybeSingle();
+    return row != null ? Shop.fromJson(row) : null;
   }
 
   Future<List<Shop>> listAllWithOwner() async {
@@ -46,14 +55,15 @@ class PetsRepository {
   }
 
   Future<List<Pet>> listAvailable({String? species}) async {
-    var query = _table.select('*, shops(name)').eq('status', 'available');
+    var query = _table.select('$petPublicColumns, shops(name)').eq('status', 'available');
     if (species != null) query = query.eq('species', species);
     final rows = await query.order('created_at', ascending: false);
     return (rows as List).map((r) => Pet.fromJson(r)).toList();
   }
 
+  /// Customer-facing: public columns only (no cost_price, no shop address/phone).
   Future<Pet?> getById(String id) async {
-    final row = await _table.select('*, shops(*)').eq('id', id).maybeSingle();
+    final row = await _table.select('$petPublicColumns, shops(name)').eq('id', id).maybeSingle();
     return row != null ? Pet.fromJson(row) : null;
   }
 
@@ -73,14 +83,15 @@ class ProductsRepository {
   }
 
   Future<List<Product>> listAvailable({String? category}) async {
-    var query = _table.select('*, shops(name)').eq('status', 'available');
+    var query = _table.select('$productPublicColumns, shops(name)').eq('status', 'available');
     if (category != null) query = query.eq('category', category);
     final rows = await query.order('created_at', ascending: false);
     return (rows as List).map((r) => Product.fromJson(r)).toList();
   }
 
+  /// Customer-facing: public columns only (no cost_price, no shop address/phone).
   Future<Product?> getById(String id) async {
-    final row = await _table.select('*, shops(*)').eq('id', id).maybeSingle();
+    final row = await _table.select('$productPublicColumns, shops(name)').eq('id', id).maybeSingle();
     return row != null ? Product.fromJson(row) : null;
   }
 

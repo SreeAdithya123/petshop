@@ -1,22 +1,39 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../data/seed_data.dart';
+import '../data/columns.dart';
 import '../models/models.dart';
-import '../repositories/repositories.dart';
 import '../services/supabase_service.dart';
+import '../state/catalog_provider.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
+import '../utils/pet_filters.dart';
 import '../widgets/pet_widgets.dart';
 import '../widgets/role_shell.dart';
+import '../widgets/shared_widgets.dart';
+import '../widgets/ui_kit.dart';
 
-const _categoryStyle = {
-  'Dog': (emoji: '🐶', color: AppColors.primary),
-  'Cat': (emoji: '🐱', color: AppColors.accent),
-  'Bird': (emoji: '🐦', color: AppColors.secondary),
-  'Rabbit': (emoji: '🐰', color: AppColors.trust),
-  'Small Pet': (emoji: '🐹', color: AppColors.warning),
+/// Species are free text on the seller side, so emoji are looked up
+/// case-insensitively (see categoryStyle in src/pages/Home.jsx).
+const _categoryEmoji = {
+  'dog': '🐶',
+  'cat': '🐱',
+  'bird': '🐦',
+  'rabbit': '🐰',
+  'fish': '🐟',
+  'hamster': '🐹',
+  'guinea pig': '🐹',
+  'small pet': '🐹',
+  'turtle': '🐢',
+  'reptile': '🦎',
 };
+
+const _exploreLinks = [
+  (path: '/services', icon: Icons.content_cut, title: 'Services', desc: 'Vets, grooming, training and more'),
+  (path: '/health', icon: Icons.monitor_heart_outlined, title: 'Health', desc: 'Check-ups and everyday pet care'),
+  (path: '/store', icon: Icons.storefront_outlined, title: 'Store', desc: 'Medicine and supplies from local shops'),
+];
 
 const _whyPetsta = [
   (icon: Icons.medical_services_outlined, title: 'Health info included', desc: 'Species, breed, and age up front'),
@@ -25,18 +42,19 @@ const _whyPetsta = [
   (icon: Icons.verified_outlined, title: 'Licensed shops only', desc: 'Every seller is a verified dealer'),
 ];
 
-/// Mirrors src/pages/Home.jsx (post-PETSTA redesign): gradient hero, why-us
-/// icons, animated stats, a live Supabase-backed featured-products strip,
-/// popular breeds, trending/top picks, top-rated shops, a category grid,
-/// and a real newsletter signup.
-class HomeScreen extends StatefulWidget {
+/// Mirrors src/pages/Home.jsx: gradient hero, why-us icons, entry cards for
+/// Services / Health / Store, real catalog totals, a live Supabase-backed
+/// featured-products strip, popular breeds, trending/top picks, top-rated
+/// shops, a species grid and a newsletter signup. Pets and shops come from
+/// the shared [catalogProvider] (no address or phone is ever shown).
+class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends ConsumerState<HomeScreen> {
   List<Product> _featuredProducts = [];
   final _newsletterController = TextEditingController();
   String _newsletterState = 'idle'; // idle | sending | done | error
@@ -53,14 +71,33 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
+  /// Public product columns plus just the shop's name (never `shops(*)`).
   Future<void> _loadFeaturedProducts() async {
     try {
-      final products = await ProductsRepository().listAvailable();
+      final rows = await SupabaseService.client
+          .from('products')
+          .select('$productPublicColumns, shops(name)')
+          .eq('status', 'available')
+          .order('created_at', ascending: false)
+          .limit(8);
       if (!mounted) return;
-      setState(() => _featuredProducts = products.take(8).toList());
+      setState(() {
+        _featuredProducts = (rows as List).map((r) => Product.fromJson(r as Map<String, dynamic>)).toList();
+      });
     } catch (_) {
-      // Featured strip is optional decoration; fail quietly.
+      // Supplementary strip: if the query fails it simply stays hidden.
     }
+  }
+
+  Future<void> _refresh() async {
+    ref.invalidate(catalogProvider);
+    final featured = _loadFeaturedProducts();
+    try {
+      await ref.read(catalogProvider.future).timeout(const Duration(seconds: 15));
+    } catch (_) {
+      // The catalog section renders its own error state.
+    }
+    await featured;
   }
 
   Future<void> _submitNewsletter() async {
@@ -81,28 +118,105 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  List<SeedPet> get _trending {
-    final list = seedPets.where((pet) => pet.status != 'sold').toList()
-      ..sort((a, b) => b.listedDate.compareTo(a.listedDate));
-    return list.take(4).toList();
+  @override
+  Widget build(BuildContext context) {
+    final catalogAsync = ref.watch(catalogProvider);
+    final loading = catalogAsync.isLoading && !catalogAsync.hasValue;
+    final failed = catalogAsync.hasError && !catalogAsync.isLoading;
+    final catalog = failed ? null : catalogAsync.value;
+    // Non-null only when there is something to show (promotes cleanly below).
+    final shown = (catalog != null && catalog.pets.isNotEmpty) ? catalog : null;
+
+    final String badge;
+    if (shown != null) {
+      final petCount = shown.pets.length;
+      final shopCount = shown.shops.length;
+      badge = '$petCount ${petCount == 1 ? 'pet' : 'pets'} across $shopCount local ${shopCount == 1 ? 'shop' : 'shops'}';
+    } else {
+      badge = 'Pets from licensed local shops';
+    }
+
+    return RoleShell(
+      title: 'PETSTA',
+      child: RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(16, 20, 16, 40),
+          children: [
+            _Hero(badge: badge),
+            const SizedBox(height: 32),
+            const _WhyPetsta(),
+            const SizedBox(height: 24),
+            const _ExploreLinks(),
+            if (loading) ...[
+              const SizedBox(height: 32),
+              const _HomeSkeleton(),
+            ],
+            if (failed) ...[
+              const SizedBox(height: 24),
+              EmptyState(
+                title: "We couldn't load pets right now",
+                description: errorText(catalogAsync.error ?? 'Something went wrong.'),
+                action: ElevatedButton(
+                  onPressed: () => ref.invalidate(catalogProvider),
+                  child: const Text('Try again'),
+                ),
+              ),
+            ],
+            if (catalog != null && catalog.pets.isEmpty) ...[
+              const SizedBox(height: 24),
+              EmptyState(
+                title: 'No pets listed right now',
+                description: "Shops haven't listed any pets yet. Check back soon.",
+                action: ElevatedButton(
+                  onPressed: () => context.push('/sellers'),
+                  child: const Text('Browse shops'),
+                ),
+              ),
+            ],
+            if (shown != null) ...[
+              const SizedBox(height: 32),
+              _StatsRow(
+                petCount: shown.pets.length,
+                shopCount: shown.shops.length,
+                speciesCount: shown.speciesList.length,
+              ),
+            ],
+            if (_featuredProducts.isNotEmpty) ...[
+              const SizedBox(height: 32),
+              _SectionHeader(title: '🔥 Featured products', actionLabel: 'View all', onAction: () => context.push('/store')),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 130,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _featuredProducts.length,
+                  separatorBuilder: (context, index) => const SizedBox(width: 12),
+                  itemBuilder: (context, index) => _FeaturedProductCard(product: _featuredProducts[index]),
+                ),
+              ),
+            ],
+            if (shown != null) ..._catalogSections(shown),
+            const SizedBox(height: 32),
+            _NewsletterCard(
+              controller: _newsletterController,
+              state: _newsletterState,
+              onSubmit: _submitNewsletter,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
-  List<SeedPet> get _topPicks {
-    final list = seedPets.where((pet) => pet.status != 'sold').toList()
-      ..sort((a, b) => b.price.compareTo(a.price));
-    return list.take(4).toList();
-  }
+  List<Widget> _catalogSections(Catalog catalog) {
+    final trending = sortPets(catalog.pets, PetSort.newest).take(4).toList();
+    final topPicks = sortPets(catalog.pets, PetSort.priceDesc).take(4).toList();
 
-  List<SeedShop> get _topShops {
-    final list = seedShops.where((shop) => shop.reviewCount > 0).toList()
-      ..sort((a, b) => b.rating.compareTo(a.rating));
-    return list.take(3).toList();
-  }
-
-  List<({String breed, SeedPet? pet})> get _featuredBreeds {
-    return breedList.take(8).map((breed) {
-      SeedPet? match;
-      for (final pet in seedPets) {
+    final breeds = catalog.breedList.take(8).map((breed) {
+      Pet? match;
+      for (final pet in catalog.pets) {
         if (pet.breed == breed) {
           match = pet;
           break;
@@ -110,136 +224,80 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       return (breed: breed, pet: match);
     }).toList();
-  }
 
-  @override
-  Widget build(BuildContext context) {
-    return RoleShell(
-      title: 'PETSTA',
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 20, 16, 40),
+    final ratedShops = catalog.shops.where((shop) => catalog.statsFor(shop.id).reviewCount > 0).toList()
+      ..sort((a, b) => catalog.statsFor(b.id).rating.compareTo(catalog.statsFor(a.id).rating));
+    final shopsAreRated = ratedShops.isNotEmpty;
+    final featuredShops = (shopsAreRated ? ratedShops : catalog.shops).take(3).toList();
+
+    return [
+      const SizedBox(height: 32),
+      _SectionHeader(title: '🐾 Popular breeds', actionLabel: 'Explore all', onAction: () => context.push('/pets')),
+      const SizedBox(height: 12),
+      GridView.count(
+        crossAxisCount: 2,
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        childAspectRatio: 0.95,
         children: [
-          _Hero(petCount: seedPets.length, shopCount: seedShops.length),
-          const SizedBox(height: 32),
-          _WhyPetsta(),
-          const SizedBox(height: 32),
-          _StatsRow(
-            petCount: seedPets.length,
-            shopCount: seedShops.length,
-            speciesCount: speciesList.length,
-          ),
-          if (_featuredProducts.isNotEmpty) ...[
-            const SizedBox(height: 32),
-            _SectionHeader(title: '🔥 Featured products', actionLabel: 'View all', onAction: () => context.push('/store')),
-            const SizedBox(height: 12),
-            SizedBox(
-              height: 130,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: _featuredProducts.length,
-                separatorBuilder: (context, index) => const SizedBox(width: 12),
-                itemBuilder: (context, index) => _FeaturedProductCard(product: _featuredProducts[index]),
-              ),
+          for (final entry in breeds)
+            _BreedCard(
+              breed: entry.breed,
+              pet: entry.pet,
+              onTap: () => context.push('/pets?breed=${Uri.encodeComponent(entry.breed)}'),
             ),
-          ],
-          const SizedBox(height: 32),
-          _SectionHeader(title: '🐾 Popular breeds', actionLabel: 'Explore all', onAction: () => context.push('/pets')),
-          const SizedBox(height: 12),
-          GridView.count(
-            crossAxisCount: 2,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
-            childAspectRatio: 0.95,
-            children: [
-              for (final entry in _featuredBreeds)
-                _BreedCard(
-                  breed: entry.breed,
-                  pet: entry.pet,
-                  onTap: () => context.push('/pets?breed=${Uri.encodeComponent(entry.breed)}'),
-                ),
-            ],
-          ),
-          const SizedBox(height: 32),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              const Icon(Icons.trending_up, size: 20, color: AppColors.trust),
-              const SizedBox(width: 6),
-              Text('Trending now', style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700)),
-            ],
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            height: 250,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: _trending.length,
-              separatorBuilder: (context, index) => const SizedBox(width: 14),
-              itemBuilder: (context, index) => SizedBox(width: 170, child: _PetMiniCard(pet: _trending[index])),
-            ),
-          ),
-          const SizedBox(height: 28),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              const Icon(Icons.favorite, size: 20, color: AppColors.accent),
-              const SizedBox(width: 6),
-              Text('Top picks', style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700)),
-            ],
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            height: 250,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: _topPicks.length,
-              separatorBuilder: (context, index) => const SizedBox(width: 14),
-              itemBuilder: (context, index) => SizedBox(width: 170, child: _PetMiniCard(pet: _topPicks[index])),
-            ),
-          ),
-          const SizedBox(height: 32),
-          Text('⭐ Top-rated shops', style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 12),
-          ..._topShops.map(
-            (shop) => Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: _TopShopCard(shop: shop),
-            ),
-          ),
-          const SizedBox(height: 32),
-          GridView.count(
-            crossAxisCount: 3,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisSpacing: 10,
-            mainAxisSpacing: 10,
-            childAspectRatio: 1,
-            children: [
-              for (final species in speciesList)
-                _CategoryTile(
-                  species: species,
-                  onTap: () => context.push('/pets?species=${Uri.encodeComponent(species)}'),
-                ),
-            ],
-          ),
-          const SizedBox(height: 32),
-          _NewsletterCard(
-            controller: _newsletterController,
-            state: _newsletterState,
-            onSubmit: _submitNewsletter,
-          ),
         ],
       ),
-    );
+      const SizedBox(height: 32),
+      const _StripTitle(icon: Icons.trending_up, color: AppColors.trust, title: 'Trending now'),
+      const SizedBox(height: 12),
+      _PetStrip(pets: trending, catalog: catalog),
+      const SizedBox(height: 28),
+      const _StripTitle(icon: Icons.favorite, color: AppColors.accent, title: 'Top picks'),
+      const SizedBox(height: 12),
+      _PetStrip(pets: topPicks, catalog: catalog),
+      if (featuredShops.isNotEmpty) ...[
+        const SizedBox(height: 32),
+        Text(
+          shopsAreRated ? '⭐ Top-rated shops' : '🏬 Local shops',
+          style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 12),
+        for (final shop in featuredShops)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: _TopShopCard(
+              shop: shop,
+              stats: catalog.statsFor(shop.id),
+              petCount: catalog.petsByShop(shop.id).length,
+            ),
+          ),
+      ],
+      const SizedBox(height: 32),
+      GridView.count(
+        crossAxisCount: 3,
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 10,
+        childAspectRatio: 1,
+        children: [
+          for (final species in catalog.speciesList)
+            _CategoryTile(
+              species: species,
+              onTap: () => context.push('/pets?species=${Uri.encodeComponent(species)}'),
+            ),
+        ],
+      ),
+    ];
   }
 }
 
 class _Hero extends StatelessWidget {
-  final int petCount;
-  final int shopCount;
-  const _Hero({required this.petCount, required this.shopCount});
+  final String badge;
+  const _Hero({required this.badge});
 
   @override
   Widget build(BuildContext context) {
@@ -264,16 +322,18 @@ class _Hero extends StatelessWidget {
               children: [
                 const Icon(Icons.pets, size: 15, color: Colors.white),
                 const SizedBox(width: 6),
-                Text(
-                  '$petCount+ pets across $shopCount local shops',
-                  style: AppTheme.body(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.white),
+                Flexible(
+                  child: Text(
+                    badge,
+                    style: AppTheme.body(fontSize: 12.5, fontWeight: FontWeight.w600, color: Colors.white),
+                  ),
                 ),
               ],
             ),
           ),
           const SizedBox(height: 16),
-          RichText(
-            text: TextSpan(
+          Text.rich(
+            TextSpan(
               style: AppTheme.display(fontSize: 32, fontWeight: FontWeight.w800, color: Colors.white),
               children: [
                 const TextSpan(text: 'The '),
@@ -314,7 +374,7 @@ class _Hero extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 20),
-          Wrap(
+          const Wrap(
             spacing: 8,
             runSpacing: 8,
             children: [
@@ -347,6 +407,8 @@ class _TrustBadge extends StatelessWidget {
 }
 
 class _WhyPetsta extends StatelessWidget {
+  const _WhyPetsta();
+
   @override
   Widget build(BuildContext context) {
     return GridView.count(
@@ -387,6 +449,87 @@ class _WhyPetsta extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// "More than pets": entry cards for Services, Health and the Store.
+class _ExploreLinks extends StatelessWidget {
+  const _ExploreLinks();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        for (final link in _exploreLinks)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Material(
+              color: AppColors.surface,
+              clipBehavior: Clip.antiAlias,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+                side: const BorderSide(color: AppColors.border),
+              ),
+              child: InkWell(
+                onTap: () => context.push(link.path),
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: AppColors.primary.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(link.icon, size: 22, color: AppColors.primary),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(link.title, style: AppTheme.display(fontSize: 15.5, fontWeight: FontWeight.w700)),
+                            Text(
+                              link.desc,
+                              style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.arrow_forward_ios, size: 14, color: AppColors.inkSoft),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Placeholder for the stats + strips while the catalog loads.
+class _HomeSkeleton extends StatelessWidget {
+  const _HomeSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return SkeletonPulse(
+      child: SizedBox(
+        height: kPetStripHeight,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: 3,
+          separatorBuilder: (context, index) => const SizedBox(width: 14),
+          itemBuilder: (context, index) => const SizedBox(width: 168, child: PetCardSkeleton()),
+        ),
+      ),
     );
   }
 }
@@ -432,6 +575,13 @@ class _StatCounterState extends State<_StatCounter> with SingleTickerProviderSta
     _controller.forward();
   }
 
+  /// Counts up again if the real total changes (e.g. after a refresh).
+  @override
+  void didUpdateWidget(covariant _StatCounter oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.target != widget.target) _controller.forward(from: 0);
+  }
+
   @override
   void dispose() {
     _controller.dispose();
@@ -457,7 +607,7 @@ class _StatCounterState extends State<_StatCounter> with SingleTickerProviderSta
                 blendMode: BlendMode.srcIn,
                 shaderCallback: (bounds) => AppColors.heroGradient.createShader(bounds),
                 child: Text(
-                  '$value+',
+                  '$value',
                   style: AppTheme.display(fontSize: 24, fontWeight: FontWeight.w800, color: Colors.white),
                 ),
               ),
@@ -492,12 +642,58 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
+class _StripTitle extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String title;
+  const _StripTitle({required this.icon, required this.color, required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Icon(icon, size: 20, color: color),
+        const SizedBox(width: 6),
+        Text(title, style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700)),
+      ],
+    );
+  }
+}
+
+/// Horizontal strip of [PetCard]s (trending / top picks).
+class _PetStrip extends StatelessWidget {
+  final List<Pet> pets;
+  final Catalog catalog;
+  const _PetStrip({required this.pets, required this.catalog});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: kPetStripHeight,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: pets.length,
+        separatorBuilder: (context, index) => const SizedBox(width: 14),
+        itemBuilder: (context, index) {
+          final pet = pets[index];
+          return SizedBox(
+            width: 168,
+            child: PetCard(pet: pet, shopName: catalog.shopById(pet.shopId)?.name),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class _FeaturedProductCard extends StatelessWidget {
   final Product product;
   const _FeaturedProductCard({required this.product});
 
   @override
   Widget build(BuildContext context) {
+    final shopName = product.shop?.name ?? '';
     return InkWell(
       onTap: () => context.push('/store/${product.id}'),
       borderRadius: BorderRadius.circular(12),
@@ -513,7 +709,7 @@ class _FeaturedProductCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              product.category,
+              titleCase(product.category),
               style: AppTheme.body(fontSize: 11, color: AppColors.inkSoft),
             ),
             const SizedBox(height: 2),
@@ -523,9 +719,9 @@ class _FeaturedProductCard extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            if (product.shop != null)
+            if (shopName.isNotEmpty)
               Text(
-                product.shop!.name,
+                shopName,
                 style: AppTheme.body(fontSize: 11, color: AppColors.inkSoft),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -544,12 +740,13 @@ class _FeaturedProductCard extends StatelessWidget {
 
 class _BreedCard extends StatelessWidget {
   final String breed;
-  final SeedPet? pet;
+  final Pet? pet;
   final VoidCallback onTap;
   const _BreedCard({required this.breed, required this.pet, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
+    final match = pet;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
@@ -561,10 +758,13 @@ class _BreedCard extends StatelessWidget {
         ),
         clipBehavior: Clip.antiAlias,
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Expanded(
-              child: PetPhotoView(src: pet?.photos?.firstOrNull, species: pet?.species ?? 'Dog'),
+              child: PetPhotoView(
+                src: match == null ? null : petCoverPhoto(match),
+                species: match?.species ?? 'Dog',
+              ),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -582,65 +782,11 @@ class _BreedCard extends StatelessWidget {
   }
 }
 
-class _PetMiniCard extends StatelessWidget {
-  final SeedPet pet;
-  const _PetMiniCard({required this.pet});
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: () => context.push('/pets/${pet.id}'),
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.border),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            AspectRatio(
-              aspectRatio: 1,
-              child: PetPhotoView(src: pet.photos?.firstOrNull, species: pet.species),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    pet.name,
-                    style: AppTheme.body(fontSize: 15, fontWeight: FontWeight.w600),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    '${pet.species} · ${pet.breed}',
-                    style: AppTheme.body(fontSize: 12.5, color: AppColors.inkSoft),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    formatPrice(pet.price),
-                    style: AppTheme.display(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.accent),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _TopShopCard extends StatelessWidget {
-  final SeedShop shop;
-  const _TopShopCard({required this.shop});
+  final Shop shop;
+  final ShopStats stats;
+  final int petCount;
+  const _TopShopCard({required this.shop, required this.stats, required this.petCount});
 
   @override
   Widget build(BuildContext context) {
@@ -648,6 +794,7 @@ class _TopShopCard extends StatelessWidget {
       onTap: () => context.push('/sellers/${shop.id}'),
       borderRadius: BorderRadius.circular(12),
       child: Container(
+        width: double.infinity,
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: AppColors.surface,
@@ -659,19 +806,18 @@ class _TopShopCard extends StatelessWidget {
           children: [
             Text(shop.name, style: AppTheme.display(fontSize: 16, fontWeight: FontWeight.w600)),
             const SizedBox(height: 6),
-            RatingStarsView(rating: shop.rating, reviewCount: shop.reviewCount),
+            if (stats.reviewCount > 0)
+              RatingStarsView(rating: stats.rating, reviewCount: stats.reviewCount)
+            else
+              Text('No reviews yet', style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
             const SizedBox(height: 8),
             Row(
               children: [
-                const Icon(Icons.location_on_outlined, size: 15, color: AppColors.inkSoft),
+                const Icon(Icons.pets, size: 15, color: AppColors.inkSoft),
                 const SizedBox(width: 5),
-                Expanded(
-                  child: Text(
-                    shop.city,
-                    style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                Text(
+                  '$petCount ${petCount == 1 ? 'pet' : 'pets'} listed',
+                  style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
                 ),
               ],
             ),
@@ -689,7 +835,7 @@ class _CategoryTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final style = _categoryStyle[species] ?? (emoji: '🐾', color: AppColors.primary);
+    final emoji = _categoryEmoji[species.toLowerCase()] ?? '🐾';
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(14),
@@ -702,12 +848,14 @@ class _CategoryTile extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(style.emoji, style: const TextStyle(fontSize: 28)),
+            Text(emoji, style: const TextStyle(fontSize: 28)),
             const SizedBox(height: 4),
             Text(
               species,
               style: AppTheme.display(fontSize: 11.5, fontWeight: FontWeight.w700),
               textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ],
         ),
@@ -791,8 +939,4 @@ class _NewsletterCard extends StatelessWidget {
       ),
     );
   }
-}
-
-extension _FirstOrNull<T> on List<T> {
-  T? get firstOrNull => isEmpty ? null : first;
 }

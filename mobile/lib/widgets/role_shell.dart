@@ -15,25 +15,31 @@ const _customerNavItems = [
   _NavItem('Shop pets', '/pets'),
   _NavItem('Store', '/store'),
   _NavItem('Shops', '/sellers'),
+  _NavItem('Services', '/services'),
+  _NavItem('Health', '/health'),
   _NavItem('Gifting', '/gifting'),
-  _NavItem('Learn', '/learn'),
   _NavItem('Support', '/support'),
-  _NavItem('Sell on PETSTA', '/for-store-owners'),
 ];
 
+// Learn and "Sell on PETSTA" now live inside My account (see AccountNav).
 const _sellerNavItems = [
   _NavItem('Dashboard', '/seller/dashboard'),
-  _NavItem('My Store', '/seller/store'),
+  _NavItem('Analytics', '/seller/analytics'),
+  _NavItem('Orders', '/seller/orders'),
   _NavItem('Pets', '/seller/pets'),
   _NavItem('Products', '/seller/products'),
-  _NavItem('Orders', '/seller/orders'),
+  _NavItem('Services', '/seller/services'),
+  _NavItem('Demo requests', '/seller/demos'),
+  _NavItem('Refunds', '/seller/refunds'),
   _NavItem('Support', '/seller/support'),
+  _NavItem('My store', '/seller/store'),
   _NavItem('Contract', '/seller/contract'),
 ];
 
 const _adminNavItems = [
   _NavItem('Dashboard', '/admin/dashboard'),
   _NavItem('Shops', '/admin/shops'),
+  _NavItem('Services', '/admin/services'),
   _NavItem('Orders', '/admin/orders'),
   _NavItem('Videos', '/admin/videos'),
   _NavItem('Support', '/admin/support'),
@@ -132,7 +138,7 @@ class RoleShell extends ConsumerWidget {
                           children: [
                             ListTile(
                               title: Text(
-                                auth.profile!.name.isNotEmpty ? auth.profile!.name : 'Account',
+                                role == 'customer' ? 'My account' : (auth.profile!.name.isNotEmpty ? auth.profile!.name : 'Account'),
                                 style: AppTheme.body(
                                   fontWeight: FontWeight.w600,
                                   color: isAdmin ? Colors.white : AppColors.ink,

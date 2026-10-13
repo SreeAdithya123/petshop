@@ -61,21 +61,25 @@ class Shop {
     this.owner,
   });
 
+  /// Tolerant on purpose: customer-facing queries select a public column
+  /// list (no address/phone) or just `shops(name)` as an embed, so every
+  /// field except [name] may be absent. Address/phone default to '' and must
+  /// never be rendered on customer screens.
   factory Shop.fromJson(Map<String, dynamic> json) => Shop(
-        id: json['id'] as String,
-        name: json['name'] as String,
-        address: json['address'] as String,
-        phone: json['phone'] as String,
-        licenseNumber: json['license_number'] as String,
-        ownerId: json['owner_id'] as String,
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        address: json['address'] as String? ?? '',
+        phone: json['phone'] as String? ?? '',
+        licenseNumber: json['license_number'] as String? ?? '',
+        ownerId: json['owner_id'] as String? ?? '',
         description: json['description'] as String?,
         bannerUrl: json['banner_url'] as String?,
-        status: json['status'] as String,
+        status: json['status'] as String? ?? '',
         contractVersion: json['contract_version'] as String?,
         contractAcceptedAt: json['contract_accepted_at'] != null
             ? DateTime.parse(json['contract_accepted_at'] as String)
             : null,
-        createdAt: DateTime.parse(json['created_at'] as String),
+        createdAt: DateTime.tryParse(json['created_at'] as String? ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0),
         owner: json['profiles'] != null
             ? Profile.fromJson(json['profiles'] as Map<String, dynamic>)
             : null,
@@ -94,6 +98,9 @@ class Pet {
   final String status; // available | reserved | sold
   final DateTime createdAt;
   final Shop? shop;
+  final String? name;
+  final String? gender; // Male | Female | null (unknown)
+  final String? certification;
 
   Pet({
     required this.id,
@@ -107,14 +114,20 @@ class Pet {
     required this.status,
     required this.createdAt,
     this.shop,
+    this.name,
+    this.gender,
+    this.certification,
   });
+
+  /// The pet's own name, falling back to its breed for unnamed listings.
+  String get displayName => (name != null && name!.trim().isNotEmpty) ? name! : breed;
 
   factory Pet.fromJson(Map<String, dynamic> json) => Pet(
         id: json['id'] as String,
         shopId: json['shop_id'] as String,
         species: json['species'] as String,
         breed: json['breed'] as String,
-        ageMonths: json['age_months'] as int,
+        ageMonths: (json['age_months'] as num?)?.toInt() ?? 0,
         price: json['price'] as num,
         description: json['description'] as String?,
         photoUrls: (json['photo_urls'] as List?)?.cast<String>() ?? const [],
@@ -123,6 +136,9 @@ class Pet {
         shop: json['shops'] != null
             ? Shop.fromJson(json['shops'] as Map<String, dynamic>)
             : null,
+        name: json['name'] as String?,
+        gender: json['gender'] as String?,
+        certification: json['certification'] as String?,
       );
 }
 
@@ -138,6 +154,7 @@ class Product {
   final String status; // available | unavailable
   final DateTime createdAt;
   final Shop? shop;
+  final bool requiresPrescription;
 
   Product({
     required this.id,
@@ -151,6 +168,7 @@ class Product {
     required this.status,
     required this.createdAt,
     this.shop,
+    this.requiresPrescription = false,
   });
 
   factory Product.fromJson(Map<String, dynamic> json) => Product(
@@ -160,13 +178,14 @@ class Product {
         name: json['name'] as String,
         description: json['description'] as String?,
         price: json['price'] as num,
-        stockQuantity: json['stock_quantity'] as int,
+        stockQuantity: (json['stock_quantity'] as num?)?.toInt() ?? 0,
         photoUrls: (json['photo_urls'] as List?)?.cast<String>() ?? const [],
         status: json['status'] as String,
         createdAt: DateTime.parse(json['created_at'] as String),
         shop: json['shops'] != null
             ? Shop.fromJson(json['shops'] as Map<String, dynamic>)
             : null,
+        requiresPrescription: json['requires_prescription'] as bool? ?? false,
       );
 }
 

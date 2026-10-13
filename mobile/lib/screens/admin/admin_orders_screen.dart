@@ -7,6 +7,7 @@ import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
 import '../../widgets/role_shell.dart';
 import '../../widgets/shared_widgets.dart';
+import '../../widgets/ui_kit.dart';
 
 /// Matches src/pages/admin/Orders.jsx: every order placed across the
 /// platform, with a client-side status filter.
@@ -59,7 +60,7 @@ class _AdminOrdersScreenState extends ConsumerState<AdminOrdersScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.toString();
+        _error = errorText(e);
         _loading = false;
       });
     }
@@ -80,7 +81,15 @@ class _AdminOrdersScreenState extends ConsumerState<AdminOrdersScreen> {
       return const LoadingView(label: 'Loading orders…');
     }
     if (_error != null) {
-      return ErrorView(message: "Couldn't load orders: $_error");
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ErrorView(message: "Couldn't load orders: $_error"),
+            OutlinedButton(onPressed: _load, child: const Text('Try again')),
+          ],
+        ),
+      );
     }
 
     final filtered = _filteredOrders;
@@ -88,6 +97,7 @@ class _AdminOrdersScreenState extends ConsumerState<AdminOrdersScreen> {
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
         padding: kScreenPadding,
         children: [
           Row(

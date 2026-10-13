@@ -56,7 +56,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           );
       if (!mounted) return;
       final profile = ref.read(authControllerProvider).profile;
-      context.go(roleHomePath(profile?.role));
+      // Come back to where the visitor was (see LoginPromptCard) when they're
+      // a customer; shop owners/admins go to their own dashboard.
+      final from = GoRouterState.of(context).uri.queryParameters['from'];
+      if (from != null && from.startsWith('/') && profile?.role == 'customer') {
+        context.go(from);
+      } else {
+        context.go(roleHomePath(profile?.role));
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {

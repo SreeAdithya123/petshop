@@ -10,6 +10,7 @@ import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
 import '../../widgets/role_shell.dart';
 import '../../widgets/shared_widgets.dart';
+import '../../widgets/ui_kit.dart';
 
 /// Mirrors src/pages/seller/Orders.jsx: orders that include at least one
 /// pet or product belonging to the signed-in seller's shop.
@@ -174,7 +175,7 @@ class _SellerOrdersScreenState extends ConsumerState<SellerOrdersScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.toString();
+        _error = errorText(e);
         _loading = false;
       });
     }
@@ -204,6 +205,20 @@ class _SellerOrdersScreenState extends ConsumerState<SellerOrdersScreen> {
       return const LoadingView(label: 'Loading orders…');
     }
 
+    // A failed load can leave _shop unset, so report the error before the
+    // "no shop yet" prompt.
+    if (_error != null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ErrorView(message: "Couldn't load orders: $_error"),
+            OutlinedButton(onPressed: _load, child: const Text('Try again')),
+          ],
+        ),
+      );
+    }
+
     if (_shop == null) {
       return Padding(
         padding: kScreenPadding,
@@ -218,10 +233,6 @@ class _SellerOrdersScreenState extends ConsumerState<SellerOrdersScreen> {
       );
     }
 
-    if (_error != null) {
-      return ErrorView(message: "Couldn't load orders: $_error");
-    }
-
     if (_orders.isEmpty) {
       return const Padding(
         padding: kScreenPadding,
@@ -232,7 +243,15 @@ class _SellerOrdersScreenState extends ConsumerState<SellerOrdersScreen> {
       );
     }
 
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: _buildList(),
+    );
+  }
+
+  Widget _buildList() {
     return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: kScreenPadding,
       children: [
         const ScreenHeader(

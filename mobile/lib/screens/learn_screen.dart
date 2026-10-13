@@ -1,25 +1,40 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../models/models.dart';
 import '../repositories/repositories.dart';
 import '../theme/app_theme.dart';
-import '../widgets/role_shell.dart';
+import '../utils/format.dart';
+import '../widgets/account/account_widgets.dart';
+import '../widgets/account_scaffold.dart';
 import '../widgets/shared_widgets.dart';
+import '../widgets/ui_kit.dart';
 
-/// Mirrors src/pages/Learn.jsx: a grid of reference videos, each opening its
-/// source video externally (the web app opens them in a new tab).
-class LearnScreen extends ConsumerStatefulWidget {
+/// Mirrors src/pages/Learn.jsx (now a section of "My account"): pet-care
+/// reference videos, each opening its source link in the browser / video app.
+class LearnScreen extends StatelessWidget {
   const LearnScreen({super.key});
 
   @override
-  ConsumerState<LearnScreen> createState() => _LearnScreenState();
+  Widget build(BuildContext context) {
+    return AccountScaffold(
+      path: '/account/learn',
+      title: 'Learn',
+      subtitle: 'Videos on pet care, from our shops and our team.',
+      builder: (context, profile) => const _LearnBody(),
+    );
+  }
 }
 
-class _LearnScreenState extends ConsumerState<LearnScreen> {
-  List<ReferenceVideo> _videos = [];
-  bool _loading = true;
+class _LearnBody extends StatefulWidget {
+  const _LearnBody();
+
+  @override
+  State<_LearnBody> createState() => _LearnBodyState();
+}
+
+class _LearnBodyState extends State<_LearnBody> {
+  List<ReferenceVideo>? _videos;
   String? _error;
 
   @override
@@ -28,146 +43,130 @@ class _LearnScreenState extends ConsumerState<LearnScreen> {
     _load();
   }
 
-  Future<void> _load() async {
+  void _retry() {
     setState(() {
-      _loading = true;
+      _videos = null;
       _error = null;
     });
+    _load();
+  }
+
+  Future<void> _load() async {
     try {
       final videos = await ReferenceVideosRepository().listAll();
       if (!mounted) return;
       setState(() {
         _videos = videos;
-        _loading = false;
+        _error = null;
       });
-    } catch (_) {
+    } catch (error) {
       if (!mounted) return;
-      setState(() {
-        _error = "Couldn't load videos. Try again.";
-        _loading = false;
-      });
+      if (_videos != null) {
+        // A background refresh failed: keep the list on screen.
+        showSnack(context, errorText(error), error: true);
+        return;
+      }
+      setState(() => _error = errorText(error));
     }
-  }
-
-  Future<void> _openVideo(String url) async {
-    final uri = Uri.tryParse(url);
-    if (uri == null) return;
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   @override
   Widget build(BuildContext context) {
-    Widget content;
-    if (_loading) {
-      content = const LoadingView();
-    } else if (_error != null) {
-      content = ErrorView(message: _error!);
-    } else {
-      content = ListView(
-        padding: kScreenPadding,
-        children: [
-          Text(
-            'Learn',
-            style: AppTheme.display(fontSize: 28, fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Videos on pet care, from our shops and our team.',
-            style: AppTheme.body(color: AppColors.inkSoft),
-          ),
-          const SizedBox(height: 20),
-          if (_videos.isEmpty)
-            const Padding(
-              padding: EdgeInsets.only(top: 24),
-              child: EmptyState(
-                title: 'No videos yet',
-                description: 'Check back soon for pet care tips.',
-              ),
-            )
-          else
-            GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
-                childAspectRatio: 0.85,
-              ),
-              itemCount: _videos.length,
-              itemBuilder: (context, index) {
-                final video = _videos[index];
-                return _VideoCard(
-                  video: video,
-                  onTap: () => _openVideo(video.videoUrl),
-                );
-              },
-            ),
-        ],
+    if (_error != null) return AccountErrorNote(message: _error!, onRetry: _retry);
+    final videos = _videos;
+    if (videos == null) return const AccountLoadingNote();
+
+    if (videos.isEmpty) {
+      return const EmptyState(
+        title: 'No videos yet',
+        description: 'Check back soon for pet care tips.',
       );
     }
 
-    return RoleShell(title: 'Learn', child: content);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        RefreshHeading(title: 'Pet care videos', onRefresh: _load),
+        const SizedBox(height: 8),
+        for (final video in videos) ...[
+          _VideoCard(key: ValueKey(video.id), video: video),
+          const SizedBox(height: 14),
+        ],
+      ],
+    );
   }
 }
 
 class _VideoCard extends StatelessWidget {
   final ReferenceVideo video;
-  final VoidCallback onTap;
-  const _VideoCard({required this.video, required this.onTap});
+  const _VideoCard({super.key, required this.video});
 
   @override
   Widget build(BuildContext context) {
     final thumbnail = video.thumbnailUrl;
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.border),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: AspectRatio(
-                aspectRatio: 16 / 10,
-                child: (thumbnail != null && thumbnail.isNotEmpty)
-                    ? Image.network(
-                        thumbnail,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) => Container(
-                          color: AppColors.primary.withValues(alpha: 0.05),
+    final category = video.category;
+    // Only plain http(s) links can be opened; anything else shows as a static card.
+    final uri = safeExternalUri(video.videoUrl);
+
+    final placeholder = Container(color: AppColors.primary.withValues(alpha: 0.05));
+
+    return Material(
+      color: AppColors.surface,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: uri == null ? null : () => openExternalUri(context, uri),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: AppColors.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      if (thumbnail != null && thumbnail.isNotEmpty)
+                        CachedNetworkImage(
+                          imageUrl: thumbnail,
+                          fit: BoxFit.cover,
+                          placeholder: (context, url) => placeholder,
+                          errorWidget: (context, url, error) => placeholder,
+                        )
+                      else
+                        placeholder,
+                      if (uri != null)
+                        Center(
+                          child: Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.55),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 28),
+                          ),
                         ),
-                      )
-                    : Container(
-                        color: AppColors.primary.withValues(alpha: 0.05),
-                      ),
+                    ],
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              video.title,
-              style: AppTheme.body(fontWeight: FontWeight.w600),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            if (video.category != null && video.category!.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(
-                _capitalize(video.category!),
-                style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft),
-              ),
+              const SizedBox(height: 10),
+              Text(video.title, style: AppTheme.body(fontWeight: FontWeight.w600)),
+              if (category != null && category.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(titleCase(category), style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
   }
 }
-
-String _capitalize(String s) =>
-    s.isEmpty ? s : '${s[0].toUpperCase()}${s.substring(1)}';
