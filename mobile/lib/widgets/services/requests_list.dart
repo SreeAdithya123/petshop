@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 
+import '../../core/async_utils.dart';
 import '../../data/service_categories.dart';
 import '../../models/service_models.dart';
 import '../../services/supabase_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
-import '../shared_widgets.dart';
+import '../skeletons.dart';
 import '../ui_kit.dart';
 import 'service_support.dart';
 
@@ -49,18 +50,20 @@ class CustomRequestsController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  /// [silent] keeps the current rows on screen instead of flashing a spinner.
+  /// [silent] keeps the current rows on screen instead of flashing a skeleton.
   Future<void> load({bool silent = false}) async {
     final generation = ++_generation;
     if (!silent || requests.isEmpty) loading = true;
     error = null;
     _notify();
     try {
-      final rows = await SupabaseService.client
-          .from('custom_service_requests')
-          .select(_requestColumns)
-          .eq('customer_id', userId)
-          .order('created_at', ascending: false);
+      final rows = await withTimeout(
+        SupabaseService.client
+            .from('custom_service_requests')
+            .select(_requestColumns)
+            .eq('customer_id', userId)
+            .order('created_at', ascending: false),
+      );
       if (_disposed || generation != _generation) return;
       requests = rows.map(CustomServiceRequest.fromJson).toList();
     } catch (e) {
@@ -73,19 +76,22 @@ class CustomRequestsController extends ChangeNotifier {
 
   Future<void> changeStatus(String id, String nextStatus) async {
     final allowedFrom = _allowedFrom[nextStatus];
-    if (allowedFrom == null) return;
+    // One change at a time: ignore a second tap while a request is in flight.
+    if (allowedFrom == null || busyId != null) return;
     busyId = id;
     actionError = null;
     _notify();
     try {
       // .select() so a row filtered out by RLS / the status guard is noticed.
-      final rows = await SupabaseService.client
-          .from('custom_service_requests')
-          .update({'status': nextStatus})
-          .eq('id', id)
-          .inFilter('status', allowedFrom)
-          .select('id');
-      if (rows.isEmpty) actionError = "That didn't go through — its status may have changed.";
+      final rows = await withTimeout(
+        SupabaseService.client
+            .from('custom_service_requests')
+            .update({'status': nextStatus})
+            .eq('id', id)
+            .inFilter('status', allowedFrom)
+            .select('id'),
+      );
+      if (rows.isEmpty) actionError = kStatusChangedMessage;
     } catch (e) {
       actionError = errorText(e);
     }
@@ -109,7 +115,7 @@ class RequestsList extends StatelessWidget {
       builder: (context, _) {
         final requests = controller.requests;
         if (controller.loading && requests.isEmpty) {
-          return const LoadingView();
+          return const ListSkeleton(count: 2, itemHeight: 120);
         }
         final error = controller.error;
         final actionError = controller.actionError;
@@ -127,13 +133,18 @@ class RequestsList extends StatelessWidget {
               const SizedBox(height: 12),
             ],
             if (actionError != null) ...[
-              Text(actionError, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
+              Semantics(
+                liveRegion: true,
+                child: Text(actionError, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
+              ),
               const SizedBox(height: 12),
             ],
             for (final request in requests) ...[
               _RequestCard(
                 request: request,
                 busy: controller.busyId == request.id,
+                // Another change is in flight: keep every action button idle.
+                locked: controller.busyId != null,
                 onChangeStatus: (status) => _changeStatus(context, request, status),
               ),
               const SizedBox(height: 12),
@@ -167,9 +178,15 @@ class RequestsList extends StatelessWidget {
 class _RequestCard extends StatelessWidget {
   final CustomServiceRequest request;
   final bool busy;
+  final bool locked;
   final ValueChanged<String> onChangeStatus;
 
-  const _RequestCard({required this.request, required this.busy, required this.onChangeStatus});
+  const _RequestCard({
+    required this.request,
+    required this.busy,
+    required this.locked,
+    required this.onChangeStatus,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -204,7 +221,9 @@ class _RequestCard extends StatelessWidget {
                 child: Text(request.title, style: AppTheme.body(fontSize: 15.5, fontWeight: FontWeight.w600)),
               ),
               const SizedBox(width: 8),
-              StatusBadge(status: request.status, label: request.status == 'open' ? 'Awaiting quotes' : null),
+              Flexible(
+                child: StatusBadge(status: request.status, label: request.status == 'open' ? 'Awaiting quotes' : null),
+              ),
             ],
           ),
           if (details.isNotEmpty) ...[
@@ -264,16 +283,16 @@ class _RequestCard extends StatelessWidget {
               children: [
                 if (quoted) ...[
                   ElevatedButton(
-                    onPressed: busy ? null : () => onChangeStatus('accepted'),
+                    onPressed: busy || locked ? null : () => onChangeStatus('accepted'),
                     child: const Text('Accept quote'),
                   ),
                   OutlinedButton(
-                    onPressed: busy ? null : () => onChangeStatus('declined'),
+                    onPressed: busy || locked ? null : () => onChangeStatus('declined'),
                     child: const Text('Decline'),
                   ),
                 ],
                 OutlinedButton(
-                  onPressed: busy ? null : () => onChangeStatus('cancelled'),
+                  onPressed: busy || locked ? null : () => onChangeStatus('cancelled'),
                   child: busy
                       ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                       : const Text('Cancel request'),

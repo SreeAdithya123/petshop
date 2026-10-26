@@ -1,15 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../models/models.dart';
 import '../state/catalog_provider.dart';
 import '../theme/app_theme.dart';
+import '../utils/format.dart';
 import '../utils/pet_filters.dart';
+import '../widgets/content_width.dart';
 import '../widgets/pet_widgets.dart';
 import '../widgets/role_shell.dart';
 import '../widgets/shared_widgets.dart';
-import '../widgets/ui_kit.dart';
 
 /// Sort options in the order the web SortSelect lists them.
 const _sortOptions = [
@@ -18,25 +20,6 @@ const _sortOptions = [
   (value: PetSort.priceDesc, label: 'Price: high to low'),
   (value: PetSort.ageAsc, label: 'Age: youngest first'),
 ];
-
-PetSort _sortFromParam(String? raw) {
-  switch (raw) {
-    case 'price-asc':
-      return PetSort.priceAsc;
-    case 'price-desc':
-      return PetSort.priceDesc;
-    case 'age-asc':
-      return PetSort.ageAsc;
-    default:
-      return PetSort.newest;
-  }
-}
-
-List<String> _listParam(Map<String, String> query, String key) {
-  final raw = query[key];
-  if (raw == null || raw.isEmpty) return const [];
-  return raw.split(',').where((value) => value.isNotEmpty).toList();
-}
 
 /// Mirrors src/pages/PetsList.jsx: every available pet from the shared
 /// catalog with species / breed / shop / price filters and a sort. The
@@ -69,12 +52,12 @@ class _PetsListScreenState extends ConsumerState<PetsListScreen> {
     if (_readInitialParams) return;
     _readInitialParams = true;
     final query = GoRouterState.of(context).uri.queryParameters;
-    _species.addAll(_listParam(query, 'species'));
-    _shopIds.addAll(_listParam(query, 'shop'));
-    _breeds.addAll(_listParam(query, 'breed'));
+    _species.addAll(parseListParam(query['species']));
+    _shopIds.addAll(parseListParam(query['shop']));
+    _breeds.addAll(parseListParam(query['breed']));
     _minPriceController.text = query['minPrice'] ?? '';
     _maxPriceController.text = query['maxPrice'] ?? '';
-    _sort = _sortFromParam(query['sort']);
+    _sort = petSortFromParam(query['sort']);
   }
 
   @override
@@ -84,12 +67,15 @@ class _PetsListScreenState extends ConsumerState<PetsListScreen> {
     super.dispose();
   }
 
-  bool get _hasActiveFilters =>
-      _species.isNotEmpty ||
-      _shopIds.isNotEmpty ||
-      _breeds.isNotEmpty ||
-      _minPriceController.text.trim().isNotEmpty ||
-      _maxPriceController.text.trim().isNotEmpty;
+  PetFilterParams get _params => PetFilterParams(
+        species: _species.toList(),
+        shops: _shopIds.toList(),
+        breeds: _breeds.toList(),
+        minPrice: parsePriceInput(_minPriceController.text),
+        maxPrice: parsePriceInput(_maxPriceController.text),
+      );
+
+  bool get _hasActiveFilters => !_params.isEmpty;
 
   void _clearFilters() {
     setState(() {
@@ -102,28 +88,7 @@ class _PetsListScreenState extends ConsumerState<PetsListScreen> {
   }
 
   List<Pet> _filteredPets(Catalog catalog) {
-    final minPrice = double.tryParse(_minPriceController.text.trim());
-    final maxPrice = double.tryParse(_maxPriceController.text.trim());
-    final filtered = applyPetFilters(
-      catalog.pets,
-      PetFilterParams(
-        species: _species.toList(),
-        shops: _shopIds.toList(),
-        breeds: _breeds.toList(),
-        minPrice: minPrice,
-        maxPrice: maxPrice,
-      ),
-    );
-    return sortPets(filtered, _sort);
-  }
-
-  Future<void> _refresh() async {
-    ref.invalidate(catalogProvider);
-    try {
-      await ref.read(catalogProvider.future).timeout(const Duration(seconds: 15));
-    } catch (_) {
-      // The screen renders the error state itself.
-    }
+    return sortPets(applyPetFilters(catalog.pets, _params), _sort);
   }
 
   void _openFilters(Catalog catalog) {
@@ -144,7 +109,9 @@ class _PetsListScreenState extends ConsumerState<PetsListScreen> {
           shopOptions: catalog.shops,
           minPriceController: _minPriceController,
           maxPriceController: _maxPriceController,
-          onChanged: () => setState(() {}),
+          onChanged: () {
+            if (mounted) setState(() {});
+          },
           onClear: () {
             _clearFilters();
             Navigator.of(sheetContext).pop();
@@ -157,9 +124,10 @@ class _PetsListScreenState extends ConsumerState<PetsListScreen> {
   @override
   Widget build(BuildContext context) {
     final catalogAsync = ref.watch(catalogProvider);
-    final loading = catalogAsync.isLoading && !catalogAsync.hasValue;
-    final failed = catalogAsync.hasError && !catalogAsync.isLoading;
-    final catalog = failed ? null : catalogAsync.value;
+    // `value` keeps the last loaded catalog while a refresh runs or fails.
+    final catalog = catalogAsync.value;
+    final loading = catalogAsync.isInitialLoad;
+    final failed = catalogAsync.hasFailed;
     final pets = catalog == null ? const <Pet>[] : _filteredPets(catalog);
 
     final String subtitle;
@@ -176,13 +144,10 @@ class _PetsListScreenState extends ConsumerState<PetsListScreen> {
       body = const PetGridSkeleton(count: 6);
     } else if (failed || catalog == null) {
       body = _scrollableMessage(
-        EmptyState(
+        CommerceRetryView(
           title: "We couldn't load pets",
-          description: errorText(catalogAsync.error ?? 'Something went wrong.'),
-          action: ElevatedButton(
-            onPressed: () => ref.invalidate(catalogProvider),
-            child: const Text('Try again'),
-          ),
+          error: catalogAsync.error,
+          onRetry: () => ref.invalidate(catalogProvider),
         ),
       );
     } else if (catalog.pets.isEmpty) {
@@ -200,7 +165,9 @@ class _PetsListScreenState extends ConsumerState<PetsListScreen> {
       body = _scrollableMessage(
         EmptyState(
           title: 'No pets match these filters',
-          description: 'Try widening your price range or clearing a filter.',
+          description: _params.hasInvertedPriceRange
+              ? 'Your minimum price is higher than your maximum. Adjust the price range to see pets.'
+              : 'Try widening your price range or clearing a filter.',
           action: OutlinedButton(
             onPressed: _clearFilters,
             child: const Text('Clear filters'),
@@ -208,64 +175,112 @@ class _PetsListScreenState extends ConsumerState<PetsListScreen> {
         ),
       );
     } else {
-      body = GridView.builder(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
-        gridDelegate: kPetGridDelegate,
-        itemCount: pets.length,
-        itemBuilder: (context, index) {
-          final pet = pets[index];
-          return PetCard(pet: pet, shopName: catalog.shopById(pet.shopId)?.name);
+      body = LayoutBuilder(
+        builder: (context, constraints) {
+          return GridView.builder(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
+            gridDelegate: petGridDelegate(context, constraints.maxWidth - 32),
+            itemCount: pets.length,
+            itemBuilder: (context, index) {
+              final pet = pets[index];
+              return PetCard(pet: pet, shopName: catalog.shopById(pet.shopId)?.name);
+            },
+          );
         },
       );
     }
 
     return RoleShell(
       title: 'Shop pets',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Shop pets', style: AppTheme.display(fontSize: 26, fontWeight: FontWeight.w700)),
-                const SizedBox(height: 6),
-                Text(subtitle, style: AppTheme.body(fontSize: 14, color: AppColors.inkSoft)),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    OutlinedButton.icon(
-                      onPressed: catalog == null ? null : () => _openFilters(catalog),
-                      icon: Icon(
-                        Icons.filter_list,
-                        size: 18,
-                        color: _hasActiveFilters ? AppColors.primary : AppColors.ink,
+      actions: const [CartAppBarAction()],
+      child: ContentWidth(
+        maxWidth: 1100,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Semantics(
+                    header: true,
+                    child: Text('Shop pets', style: AppTheme.display(fontSize: 26, fontWeight: FontWeight.w700)),
+                  ),
+                  const SizedBox(height: 6),
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(subtitle, style: AppTheme.body(fontSize: 14, color: AppColors.inkSoft)),
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: catalog == null ? null : () => _openFilters(catalog),
+                        icon: Icon(
+                          Icons.filter_list,
+                          size: 18,
+                          color: _hasActiveFilters ? AppColors.primary : AppColors.ink,
+                        ),
+                        label: Text(_hasActiveFilters ? 'Filters •' : 'Filters'),
                       ),
-                      label: Text(_hasActiveFilters ? 'Filters •' : 'Filters'),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _SortDropdown(
+                          value: _sort,
+                          onChanged: (value) => setState(() => _sort = value),
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _SortDropdown(
-                        value: _sort,
-                        onChanged: (value) => setState(() => _sort = value),
-                      ),
+                    ],
+                  ),
+                  if (_hasActiveFilters && catalog != null) ...[
+                    const SizedBox(height: 10),
+                    _ActiveFilterChips(
+                      labels: _activeFilterLabels(catalog),
+                      onRemove: (key) => _removeFilter(key),
+                      onClear: _clearFilters,
                     ),
                   ],
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          Expanded(
-            child: loading ? body : RefreshIndicator(onRefresh: _refresh, child: body),
-          ),
-        ],
+            Expanded(
+              child: loading ? body : RefreshIndicator(onRefresh: () => refreshCatalog(ref), child: body),
+            ),
+          ],
+        ),
       ),
     );
+  }
+
+  /// (key, label) for every active filter, e.g. ('species:Dog', 'Dog').
+  List<({String key, String label})> _activeFilterLabels(Catalog catalog) {
+    final minPrice = parsePriceInput(_minPriceController.text);
+    final maxPrice = parsePriceInput(_maxPriceController.text);
+    return [
+      for (final value in _species) (key: 'species:$value', label: value),
+      for (final value in _breeds) (key: 'breed:$value', label: value),
+      for (final id in _shopIds) (key: 'shop:$id', label: catalog.shopById(id)?.name ?? 'Shop'),
+      if (minPrice != null) (key: 'min', label: 'From ${formatPrice(minPrice)}'),
+      if (maxPrice != null) (key: 'max', label: 'Up to ${formatPrice(maxPrice)}'),
+    ];
+  }
+
+  void _removeFilter(String key) {
+    setState(() {
+      if (key == 'min') {
+        _minPriceController.clear();
+      } else if (key == 'max') {
+        _maxPriceController.clear();
+      } else if (key.startsWith('species:')) {
+        _species.remove(key.substring('species:'.length));
+      } else if (key.startsWith('breed:')) {
+        _breeds.remove(key.substring('breed:'.length));
+      } else if (key.startsWith('shop:')) {
+        _shopIds.remove(key.substring('shop:'.length));
+      }
+    });
   }
 
   /// Wraps a state message so pull-to-refresh still works on it.
@@ -278,6 +293,38 @@ class _PetsListScreenState extends ConsumerState<PetsListScreen> {
   }
 }
 
+/// Removable chips summarising the active filters, so a deep link such as
+/// /pets?species=Dog visibly shows what it applied.
+class _ActiveFilterChips extends StatelessWidget {
+  final List<({String key, String label})> labels;
+  final ValueChanged<String> onRemove;
+  final VoidCallback onClear;
+  const _ActiveFilterChips({required this.labels, required this.onRemove, required this.onClear});
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          for (final entry in labels)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: InputChip(
+                label: Text(entry.label, style: AppTheme.body(fontSize: 13)),
+                deleteButtonTooltipMessage: 'Remove ${entry.label} filter',
+                onDeleted: () => onRemove(entry.key),
+                backgroundColor: AppColors.surface,
+                side: const BorderSide(color: AppColors.border),
+              ),
+            ),
+          TextButton(onPressed: onClear, child: const Text('Clear all')),
+        ],
+      ),
+    );
+  }
+}
+
 class _SortDropdown extends StatelessWidget {
   final PetSort value;
   final ValueChanged<PetSort> onChanged;
@@ -285,25 +332,30 @@ class _SortDropdown extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        border: Border.all(color: AppColors.border),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<PetSort>(
-          value: value,
-          isExpanded: true,
-          icon: const Icon(Icons.keyboard_arrow_down, size: 18),
-          style: AppTheme.body(fontSize: 14),
-          items: [
-            for (final option in _sortOptions)
-              DropdownMenuItem(value: option.value, child: Text(option.label, overflow: TextOverflow.ellipsis)),
-          ],
-          onChanged: (v) {
-            if (v != null) onChanged(v);
-          },
+    return Semantics(
+      label: 'Sort pets',
+      container: true,
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 48),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          border: Border.all(color: AppColors.border),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: DropdownButtonHideUnderline(
+          child: DropdownButton<PetSort>(
+            value: value,
+            isExpanded: true,
+            icon: const Icon(Icons.keyboard_arrow_down, size: 18),
+            style: AppTheme.body(fontSize: 14),
+            items: [
+              for (final option in _sortOptions)
+                DropdownMenuItem(value: option.value, child: Text(option.label, overflow: TextOverflow.ellipsis)),
+            ],
+            onChanged: (v) {
+              if (v != null) onChanged(v);
+            },
+          ),
         ),
       ),
     );
@@ -350,6 +402,12 @@ class _FilterSheetState extends State<_FilterSheet> {
       widget.minPriceController.text.trim().isNotEmpty ||
       widget.maxPriceController.text.trim().isNotEmpty;
 
+  bool get _invertedRange {
+    final min = parsePriceInput(widget.minPriceController.text);
+    final max = parsePriceInput(widget.maxPriceController.text);
+    return min != null && max != null && min > max;
+  }
+
   void _toggle(Set<String> set, String value) {
     setState(() {
       if (!set.remove(value)) set.add(value);
@@ -359,7 +417,7 @@ class _FilterSheetState extends State<_FilterSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final keyboardInset = MediaQuery.of(context).viewInsets.bottom;
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
     return DraggableScrollableSheet(
       initialChildSize: 0.85,
       minChildSize: 0.5,
@@ -369,14 +427,23 @@ class _FilterSheetState extends State<_FilterSheet> {
         return SafeArea(
           child: ListView(
             controller: scrollController,
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             padding: EdgeInsets.fromLTRB(20, 16, 20, 28 + keyboardInset),
             children: [
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text('Filters', style: AppTheme.display(fontSize: 18, fontWeight: FontWeight.w600)),
-                  if (_hasActiveFilters)
-                    TextButton(onPressed: widget.onClear, child: const Text('Clear all')),
+                  Expanded(
+                    child: Semantics(
+                      header: true,
+                      child: Text('Filters', style: AppTheme.display(fontSize: 18, fontWeight: FontWeight.w600)),
+                    ),
+                  ),
+                  if (_hasActiveFilters) TextButton(onPressed: widget.onClear, child: const Text('Clear all')),
+                  IconButton(
+                    tooltip: 'Close filters',
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close),
+                  ),
                 ],
               ),
               const SizedBox(height: 8),
@@ -420,6 +487,7 @@ class _FilterSheetState extends State<_FilterSheet> {
               Text('Price range', style: AppTheme.body(fontSize: 15, fontWeight: FontWeight.w500)),
               const SizedBox(height: 10),
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Expanded(
                     child: _PriceField(
@@ -446,6 +514,16 @@ class _FilterSheetState extends State<_FilterSheet> {
                   ),
                 ],
               ),
+              if (_invertedRange) ...[
+                const SizedBox(height: 8),
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    'The minimum is higher than the maximum, so no pets will match.',
+                    style: AppTheme.body(fontSize: 12.5, color: AppColors.error),
+                  ),
+                ),
+              ],
               const SizedBox(height: 24),
               ElevatedButton(
                 onPressed: () => Navigator.of(context).pop(),
@@ -481,8 +559,10 @@ class _PriceField extends StatelessWidget {
         const SizedBox(height: 4),
         TextField(
           controller: controller,
-          keyboardType: const TextInputType.numberWithOptions(decimal: false),
-          decoration: InputDecoration(hintText: hint),
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          maxLength: 9,
+          decoration: InputDecoration(hintText: hint, counterText: ''),
           onChanged: (_) => onChanged(),
         ),
       ],

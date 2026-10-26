@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../models/models.dart';
 import '../../models/service_models.dart';
@@ -11,56 +12,61 @@ import '../../widgets/seller/services_tab.dart';
 import '../../widgets/seller_scaffold.dart';
 
 /// Mirrors src/pages/seller/Services.jsx: the shop's services, the bookings
-/// customers make and the custom requests it can quote on.
+/// customers make and the custom requests it can quote on. `?tab=bookings` or
+/// `?tab=requests` opens that tab directly (the dashboard counters use it).
 class SellerServicesScreen extends StatelessWidget {
   const SellerServicesScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
+    String? initialTab;
+    try {
+      initialTab = GoRouterState.of(context).uri.queryParameters['tab'];
+    } catch (_) {
+      initialTab = null;
+    }
     return SellerScaffold(
       title: 'Services',
       subtitle: 'Manage the services your shop offers, the bookings customers make and their custom requests.',
-      builder: (context, shop) => _ServicesWorkspace(shop: shop),
+      builder: (context, shop) => _ServicesWorkspace(shop: shop, initialTab: initialTab),
     );
   }
 }
+
+const _tabs = ['services', 'bookings', 'requests'];
 
 // Custom requests are read without customer_id: shop owners never see who asked.
 const _requestColumns =
     'id, title, description, category, pet_name, pet_species, preferred_date, budget, status, shop_id, quoted_price, response_message, responded_at, created_at';
 
 Future<List<ServiceItem>> _fetchServices(String shopId) async {
-  final data = await SupabaseService.client
-      .from('services')
-      .select()
-      .eq('shop_id', shopId)
-      .order('created_at', ascending: false);
-  return data.map(ServiceItem.fromJson).toList();
+  final data = await fetchAllRows(() => SupabaseService.client.from('services').select().eq('shop_id', shopId));
+  final rows = data.map(ServiceItem.fromJson).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  return rows;
 }
 
 Future<WithCustomers<ServiceBooking>> _fetchBookings(String shopId) async {
-  final data = await SupabaseService.client
-      .from('service_bookings')
-      .select()
-      .eq('shop_id', shopId)
-      .order('created_at', ascending: false);
-  final rows = data.map(ServiceBooking.fromJson).toList();
+  final data = await fetchAllRows(() => SupabaseService.client.from('service_bookings').select().eq('shop_id', shopId));
+  final rows = data.map(ServiceBooking.fromJson).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
   return attachCustomers<ServiceBooking>(rows, (booking) => booking.customerId);
 }
 
 // Every open request is visible to approved shop owners; the rest are the ones this shop quoted.
 Future<List<CustomServiceRequest>> _fetchRequests(String shopId) async {
-  final data = await SupabaseService.client
-      .from('custom_service_requests')
-      .select(_requestColumns)
-      .or('status.eq.open,shop_id.eq.$shopId')
-      .order('created_at', ascending: false);
-  return data.map(CustomServiceRequest.fromJson).toList();
+  final data = await fetchAllRows(
+    () => SupabaseService.client
+        .from('custom_service_requests')
+        .select(_requestColumns)
+        .or('status.eq.open,shop_id.eq.$shopId'),
+  );
+  final rows = data.map(CustomServiceRequest.fromJson).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  return rows;
 }
 
 class _ServicesWorkspace extends ConsumerStatefulWidget {
   final Shop shop;
-  const _ServicesWorkspace({required this.shop});
+  final String? initialTab;
+  const _ServicesWorkspace({required this.shop, this.initialTab});
 
   @override
   ConsumerState<_ServicesWorkspace> createState() => _ServicesWorkspaceState();
@@ -70,12 +76,13 @@ class _ServicesWorkspaceState extends ConsumerState<_ServicesWorkspace> {
   late final SellerQuery<List<ServiceItem>> _services;
   late final SellerQuery<WithCustomers<ServiceBooking>> _bookings;
   late final SellerQuery<List<CustomServiceRequest>> _requests;
-  String _tab = 'services';
+  late String _tab;
 
   @override
   void initState() {
     super.initState();
     final shopId = widget.shop.id;
+    _tab = _tabs.contains(widget.initialTab) ? widget.initialTab! : 'services';
     _services = SellerQuery<List<ServiceItem>>(() => _fetchServices(shopId));
     _bookings = SellerQuery<WithCustomers<ServiceBooking>>(() => _fetchBookings(shopId));
     _requests = SellerQuery<List<CustomServiceRequest>>(() => _fetchRequests(shopId));

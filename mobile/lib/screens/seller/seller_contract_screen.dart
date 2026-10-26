@@ -1,14 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../models/models.dart';
-import '../../repositories/repositories.dart';
-import '../../state/auth_provider.dart';
+import '../../state/my_shop_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
-import '../../widgets/role_shell.dart';
-import '../../widgets/shared_widgets.dart';
+import '../../widgets/seller/seller_common.dart';
+import '../../widgets/seller_scaffold.dart';
+import '../../widgets/ui_kit.dart';
 
 const _contractTerms =
     "By accepting this contract, you agree to list only pets and products you're licensed to sell, "
@@ -17,183 +16,116 @@ const _contractTerms =
 
 /// Mirrors src/pages/seller/Contract.jsx: shows the seller contract terms
 /// and lets the shop owner accept them.
-class SellerContractScreen extends ConsumerStatefulWidget {
+class SellerContractScreen extends StatelessWidget {
   const SellerContractScreen({super.key});
 
   @override
-  ConsumerState<SellerContractScreen> createState() => _SellerContractScreenState();
+  Widget build(BuildContext context) {
+    return SellerScaffold(
+      title: 'Contract',
+      subtitle: 'The terms your shop operates under on PETSTA.',
+      builder: (context, shop) => _ContractView(shop: shop),
+    );
+  }
 }
 
-class _SellerContractScreenState extends ConsumerState<SellerContractScreen> {
-  Shop? _shop;
-  bool _loading = true;
+class _ContractView extends ConsumerStatefulWidget {
+  final Shop shop;
+  const _ContractView({required this.shop});
+
+  @override
+  ConsumerState<_ContractView> createState() => _ContractViewState();
+}
+
+class _ContractViewState extends ConsumerState<_ContractView> {
   bool _accepting = false;
   String? _error;
 
-  @override
-  void initState() {
-    super.initState();
-    _loadShop();
-  }
+  Future<void> _accept() async {
+    if (_accepting) return;
+    final shop = widget.shop;
+    if (shop.contractAcceptedAt != null) return;
 
-  Future<void> _loadShop() async {
-    if (!mounted) return;
-    setState(() => _loading = true);
-
-    final profile = ref.read(authControllerProvider).profile;
-    if (profile == null) {
-      if (!mounted) return;
-      setState(() {
-        _shop = null;
-        _loading = false;
-      });
-      return;
-    }
-
-    final shop = await ShopsRepository().getByOwnerId(profile.id);
-    if (!mounted) return;
-    setState(() {
-      _shop = shop;
-      _loading = false;
-    });
-  }
-
-  Future<void> _handleAccept() async {
-    final shop = _shop;
-    if (shop == null || shop.contractAcceptedAt != null) return;
+    final confirmed = await confirmAction(
+      context,
+      title: 'Accept the seller contract?',
+      message: 'You confirm that you have read the terms and agree to follow them for ${shop.name}.',
+      confirmLabel: 'Accept contract',
+    );
+    if (!confirmed || !mounted) return;
 
     setState(() {
       _accepting = true;
       _error = null;
     });
+    final failure = await updateRow('shops', shop.id, {
+      'contract_accepted_at': DateTime.now().toUtc().toIso8601String(),
+      if (shop.contractVersion == null) 'contract_version': '1.0',
+    });
+    if (!mounted) return;
+    setState(() {
+      _accepting = false;
+      _error = failure;
+    });
+    if (failure != null) return;
 
-    try {
-      final update = <String, dynamic>{
-        'contract_accepted_at': DateTime.now().toIso8601String(),
-        if (shop.contractVersion == null) 'contract_version': '1.0',
-      };
-      await ShopsRepository().update(shop.id, update);
-      await _loadShop();
-    } catch (updateError) {
-      if (!mounted) return;
-      setState(() => _error = updateError.toString());
-    } finally {
-      if (mounted) setState(() => _accepting = false);
-    }
+    showSnack(context, 'Contract accepted. Thank you!');
+    ref.invalidate(myShopProvider);
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) {
-      return const RoleShell(
-        title: 'Contract',
-        child: LoadingView(label: 'Loading contract…'),
-      );
-    }
+    final shop = widget.shop;
+    final acceptedAt = shop.contractAcceptedAt;
+    final accepted = acceptedAt != null;
+    final version = (shop.contractVersion ?? '').trim();
 
-    if (_shop == null) {
-      return RoleShell(
-        title: 'Contract',
-        child: Padding(
-          padding: kScreenPadding,
-          child: EmptyState(
-            title: "You haven't set up your shop yet",
-            description: 'Create your shop profile first.',
-            action: ElevatedButton(
-              onPressed: () => context.push('/seller/store'),
-              child: const Text('Set up your shop'),
-            ),
-          ),
-        ),
-      );
-    }
-
-    final shop = _shop!;
-    final isAccepted = shop.contractAcceptedAt != null;
-
-    return RoleShell(
-      title: 'Contract',
-      child: SingleChildScrollView(
-        padding: kScreenPadding,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Seller contract', style: AppTheme.display(fontSize: 24, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 8),
-            Text(
-              'The terms your shop operates under on PETSTA.',
-              style: AppTheme.body(color: AppColors.inkSoft),
-            ),
-            const SizedBox(height: 24),
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                border: Border.all(color: AppColors.border),
-                borderRadius: BorderRadius.circular(12),
-                color: AppColors.surface,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('Contract version', style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
-                      Text(
-                        shop.contractVersion ?? 'No contract version on file yet',
-                        style: AppTheme.body(),
-                      ),
-                    ],
+    return CardBox(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SellerMetaRow('Contract version', text: version.isEmpty ? 'No version on file yet' : version),
+          SellerMetaRow('Accepted on', text: acceptedAt != null ? formatOrderDate(acceptedAt) : 'Not yet accepted'),
+          const SizedBox(height: 16),
+          if (accepted) ...[
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(top: 2),
+                  child: Icon(Icons.check_circle, size: 20, color: AppColors.trust),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    "You've accepted the current seller contract.",
+                    style: AppTheme.body(fontWeight: FontWeight.w600, color: AppColors.trust),
                   ),
-                  const SizedBox(height: 10),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('Accepted on', style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
-                      Text(
-                        isAccepted ? formatOrderDate(shop.contractAcceptedAt!) : 'Not yet accepted',
-                        style: AppTheme.body(),
-                      ),
-                    ],
-                  ),
-                  if (isAccepted) ...[
-                    const SizedBox(height: 24),
-                    Row(
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: const BoxDecoration(color: AppColors.trust, shape: BoxShape.circle),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            "You've accepted the current seller contract.",
-                            style: AppTheme.body(fontWeight: FontWeight.w600, color: AppColors.trust),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ] else ...[
-                    const SizedBox(height: 24),
-                    const Divider(height: 1, color: AppColors.border),
-                    const SizedBox(height: 20),
-                    Text(_contractTerms, style: AppTheme.body()),
-                    if (_error != null) ...[
-                      const SizedBox(height: 12),
-                      Text(_error!, style: AppTheme.body(color: AppColors.error)),
-                    ],
-                    const SizedBox(height: 20),
-                    ElevatedButton(
-                      onPressed: _accepting ? null : _handleAccept,
-                      child: Text(_accepting ? 'Accepting…' : 'Accept contract'),
-                    ),
-                  ],
-                ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+          ],
+          // The terms stay readable after acceptance.
+          const Divider(height: 1, color: AppColors.border),
+          const SizedBox(height: 16),
+          Text(_contractTerms, style: AppTheme.body()),
+          if (!accepted) ...[
+            if (_error != null) ...[
+              const SizedBox(height: 16),
+              NoticeBox.error(message: _error!),
+            ],
+            const SizedBox(height: 20),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: LoadingButton(
+                label: 'Accept contract',
+                loading: _accepting,
+                onPressed: _accept,
               ),
             ),
           ],
-        ),
+        ],
       ),
     );
   }

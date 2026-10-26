@@ -1,365 +1,235 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../models/models.dart';
-import '../../repositories/repositories.dart';
-import '../../services/supabase_service.dart';
-import '../../state/auth_provider.dart';
-import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
-import '../../widgets/role_shell.dart';
+import '../../widgets/seller/order_card.dart';
+import '../../widgets/seller/order_data.dart';
+import '../../widgets/seller/seller_common.dart';
+import '../../widgets/seller_scaffold.dart';
 import '../../widgets/shared_widgets.dart';
 import '../../widgets/ui_kit.dart';
 
-/// Mirrors src/pages/seller/Orders.jsx: orders that include at least one
-/// pet or product belonging to the signed-in seller's shop.
-class SellerOrdersScreen extends ConsumerStatefulWidget {
+/// Mirrors src/pages/seller/Orders.jsx and adds the order lifecycle: orders
+/// that include this shop's items, with Mark paid / Mark handed over / Cancel
+/// (customers pay and collect in person, so the shop owner records each step).
+class SellerOrdersScreen extends StatelessWidget {
   const SellerOrdersScreen({super.key});
 
   @override
-  ConsumerState<SellerOrdersScreen> createState() => _SellerOrdersScreenState();
+  Widget build(BuildContext context) {
+    return SellerScaffold(
+      title: 'Orders',
+      subtitle: 'Orders that include items from your shop.',
+      builder: (context, shop) => _OrdersWorkspace(shop: shop),
+    );
+  }
 }
 
-const _orderTypeLabels = {
-  'product_purchase': 'Product purchase',
-  'pet_reservation': 'Pet reservation',
-  'gift': 'Gift',
+const _filters = <StatusFilter>[
+  StatusFilter('pending', 'Pending'),
+  StatusFilter('paid', 'Paid'),
+  StatusFilter('fulfilled', 'Handed over'),
+  StatusFilter('cancelled', 'Cancelled'),
+  StatusFilter('all', 'All'),
+];
+
+class _Transition {
+  final String title;
+  final String message;
+  final String confirmLabel;
+  final String success;
+  const _Transition(this.title, this.message, this.confirmLabel, this.success);
+}
+
+const _transitions = <String, _Transition>{
+  'paid': _Transition(
+    'Mark this order as paid?',
+    'Confirm you have received the payment for this order in person.',
+    'Mark paid',
+    'Order marked as paid.',
+  ),
+  'fulfilled': _Transition(
+    'Mark this order as handed over?',
+    'Confirm the customer has collected their items. Reserved pets in this order are marked as sold.',
+    'Mark handed over',
+    'Order marked as handed over.',
+  ),
+  'cancelled': _Transition(
+    'Cancel this order?',
+    'Reserved pets go back to the catalog so other customers can reserve them again. '
+        'The customer will see the order as cancelled. This can\'t be undone.',
+    'Cancel order',
+    'Order cancelled. Any reserved pets are back in the catalog.',
+  ),
 };
 
-class _OrderLineItem {
-  final String name;
-  final int quantity;
-  final num price;
+String _statusOf(SellerOrder order) => order.status;
 
-  const _OrderLineItem({required this.name, required this.quantity, required this.price});
+class _OrdersWorkspace extends ConsumerStatefulWidget {
+  final Shop shop;
+  const _OrdersWorkspace({required this.shop});
+
+  @override
+  ConsumerState<_OrdersWorkspace> createState() => _OrdersWorkspaceState();
 }
 
-class _OrderCard {
-  final String id;
-  final String orderType;
-  final String status;
-  final num totalAmount;
-  final DateTime createdAt;
-  final String customerName;
-  final List<_OrderLineItem> items;
-
-  const _OrderCard({
-    required this.id,
-    required this.orderType,
-    required this.status,
-    required this.totalAmount,
-    required this.createdAt,
-    required this.customerName,
-    required this.items,
-  });
-}
-
-class _SellerOrdersScreenState extends ConsumerState<SellerOrdersScreen> {
-  bool _loading = true;
-  String? _error;
-  Shop? _shop;
-  List<_OrderCard> _orders = [];
+class _OrdersWorkspaceState extends ConsumerState<_OrdersWorkspace> {
+  late final SellerQuery<ShopOrdersData> _query;
+  String? _filter;
+  int _limit = kPageSize;
+  String? _busyOrderId;
+  String? _busyStatus;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    final shopId = widget.shop.id;
+    _query = SellerQuery<ShopOrdersData>(() => loadShopOrders(shopId));
   }
 
-  Future<void> _load() async {
-    final profile = ref.read(authControllerProvider).profile;
-    if (profile == null) {
-      setState(() => _loading = false);
+  @override
+  void dispose() {
+    _query.dispose();
+    super.dispose();
+  }
+
+  Future<void> _move(SellerOrder order, String status) async {
+    if (_busyOrderId != null) return;
+    final transition = _transitions[status];
+    if (transition == null) return;
+
+    final confirmed = await confirmAction(
+      context,
+      title: transition.title,
+      message: '${orderTypeLabel(order.orderType)} ${shortId(order.id)} · ${order.customerName}\n\n${transition.message}',
+      confirmLabel: transition.confirmLabel,
+      cancelLabel: status == 'cancelled' ? 'Keep order' : 'Cancel',
+      destructive: status == 'cancelled',
+    );
+    if (!confirmed || !mounted) return;
+
+    setState(() {
+      _busyOrderId = order.id;
+      _busyStatus = status;
+    });
+    final failure = await callRpc('seller_update_order_status', {'p_order_id': order.id, 'p_status': status});
+    if (!mounted) return;
+
+    if (failure == null) {
+      // Re-read the orders while the card is still busy so it shows the real
+      // state, and so we can confirm the change actually stuck.
+      await _query.reload();
+      if (!mounted) return;
+    }
+    setState(() {
+      _busyOrderId = null;
+      _busyStatus = null;
+    });
+
+    if (failure != null) {
+      showSnack(context, failure, error: true);
+      // The order may have moved on elsewhere (the customer cancelled, another
+      // device): show its real state. Nothing to refresh when the server
+      // function isn't deployed yet.
+      if (failure != kNotAvailableYet) _query.reload();
       return;
     }
 
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-
-    try {
-      final shop = await ShopsRepository().getByOwnerId(profile.id);
-      if (shop == null) {
-        if (!mounted) return;
-        setState(() {
-          _shop = null;
-          _loading = false;
-        });
-        return;
-      }
-
-      final pets = await PetsRepository().listByShop(shop.id);
-      final products = await ProductsRepository().listByShop(shop.id);
-
-      final petIds = pets.map((pet) => pet.id).toList();
-      final productIds = products.map((product) => product.id).toList();
-
-      final names = <String, String>{};
-      for (final pet in pets) {
-        names[pet.id] = pet.breed.isNotEmpty ? '${pet.breed} (${pet.species})' : pet.species;
-      }
-      for (final product in products) {
-        names[product.id] = product.name;
-      }
-
-      if (petIds.isEmpty && productIds.isEmpty) {
-        if (!mounted) return;
-        setState(() {
-          _shop = shop;
-          _orders = [];
-          _loading = false;
-        });
-        return;
-      }
-
-      final orderItemsRepo = OrderItemsRepository();
-      final petOrderIds = await orderItemsRepo.orderIdsForItems(itemType: 'pet', itemIds: petIds);
-      final productOrderIds =
-          await orderItemsRepo.orderIdsForItems(itemType: 'product', itemIds: productIds);
-      final orderIds = <String>{...petOrderIds, ...productOrderIds}.toList();
-
-      if (orderIds.isEmpty) {
-        if (!mounted) return;
-        setState(() {
-          _shop = shop;
-          _orders = [];
-          _loading = false;
-        });
-        return;
-      }
-
-      final rawOrders = await OrdersRepository().listByIds(orderIds);
-
-      final orders = <_OrderCard>[];
-      for (final row in rawOrders) {
-        final itemRows = await SupabaseService.client
-            .from('order_items')
-            .select()
-            .eq('order_id', row['id']);
-        final items = (itemRows as List)
-            .cast<Map<String, dynamic>>()
-            .map(
-              (item) => _OrderLineItem(
-                name: names[item['item_id']] ?? 'Item',
-                quantity: item['quantity'] as int,
-                price: item['price_at_purchase'] as num,
-              ),
-            )
-            .toList();
-
-        // OrdersRepository().listByIds doesn't join profiles, so the
-        // customer name is unavailable here; fall back to a generic label.
-        final profileJson = row['profiles'] as Map<String, dynamic>?;
-
-        orders.add(
-          _OrderCard(
-            id: row['id'] as String,
-            orderType: row['order_type'] as String,
-            status: row['status'] as String,
-            totalAmount: row['total_amount'] as num,
-            createdAt: DateTime.parse(row['created_at'] as String),
-            customerName: (profileJson?['name'] as String?) ?? 'Customer',
-            items: items,
-          ),
-        );
-      }
-
-      if (!mounted) return;
-      setState(() {
-        _shop = shop;
-        _orders = orders;
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = errorText(e);
-        _loading = false;
-      });
+    // The server accepted the call; if the fresh data still shows another
+    // status, a rule on the server refused it quietly.
+    String? currentStatus;
+    for (final candidate in _query.data?.orders ?? const <SellerOrder>[]) {
+      if (candidate.id == order.id) currentStatus = candidate.status;
     }
-  }
-
-  Color _statusColor(String status) {
-    switch (status) {
-      case 'paid':
-      case 'fulfilled':
-        return AppColors.trust;
-      case 'pending':
-        return AppColors.primary;
-      case 'cancelled':
-        return AppColors.error;
-      default:
-        return AppColors.inkSoft;
+    final unchanged = _query.error == null && currentStatus != null && currentStatus != status;
+    if (unchanged) {
+      showSnack(context, kNothingChanged, error: true);
+      return;
     }
+    showSnack(context, transition.success);
   }
 
   @override
   Widget build(BuildContext context) {
-    return RoleShell(title: 'Orders', child: _buildBody());
-  }
+    listenForShopRefresh(ref, _query.reload);
+    final readOnly = widget.shop.status != 'approved';
 
-  Widget _buildBody() {
-    if (_loading) {
-      return const LoadingView(label: 'Loading orders…');
-    }
+    return SellerQueryPanel<ShopOrdersData>(
+      query: _query,
+      what: 'orders',
+      builder: (context, data) {
+        final rows = data.orders;
+        final pendingCount = rows.where((order) => order.status == 'pending').length;
+        final paidCount = rows.where((order) => order.status == 'paid').length;
+        // Open on "Pending" when something needs doing, otherwise show everything.
+        final active = _filter ?? (pendingCount > 0 ? 'pending' : 'all');
+        final visible = applyStatusFilter(_filters, active, rows, _statusOf);
+        final shown = math.min(_limit, visible.length);
 
-    // A failed load can leave _shop unset, so report the error before the
-    // "no shop yet" prompt.
-    if (_error != null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            ErrorView(message: "Couldn't load orders: $_error"),
-            OutlinedButton(onPressed: _load, child: const Text('Try again')),
-          ],
-        ),
-      );
-    }
-
-    if (_shop == null) {
-      return Padding(
-        padding: kScreenPadding,
-        child: EmptyState(
-          title: "You haven't set up your shop yet",
-          description: 'Create your shop profile first.',
-          action: ElevatedButton(
-            onPressed: () => context.push('/seller/store'),
-            child: const Text('Set up your shop'),
-          ),
-        ),
-      );
-    }
-
-    if (_orders.isEmpty) {
-      return const Padding(
-        padding: kScreenPadding,
-        child: EmptyState(
-          title: 'No orders yet',
-          description: 'Orders for your pets and products will show up here.',
-        ),
-      );
-    }
-
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: _buildList(),
-    );
-  }
-
-  Widget _buildList() {
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      padding: kScreenPadding,
-      children: [
-        const ScreenHeader(
-          title: 'Orders',
-          subtitle: 'Orders that include items from your shop.',
-        ),
-        const SizedBox(height: 24),
-        for (final order in _orders) ...[
-          _OrderCardView(order: order, statusColor: _statusColor(order.status)),
-          const SizedBox(height: 16),
-        ],
-      ],
-    );
-  }
-}
-
-class _OrderCardView extends StatelessWidget {
-  final _OrderCard order;
-  final Color statusColor;
-
-  const _OrderCardView({required this.order, required this.statusColor});
-
-  @override
-  Widget build(BuildContext context) {
-    final typeLabel = _orderTypeLabels[order.orderType] ?? order.orderType.replaceAll('_', ' ');
-
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      typeLabel,
-                      style: AppTheme.display(fontSize: 17, fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '${order.customerName} · ${formatOrderDate(order.createdAt)}',
-                      style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
-                    ),
-                  ],
+            const NoticeBox(
+              message:
+                  'Customers pay and collect in person. Mark an order paid when you receive the payment, then handed over '
+                  'once they have collected it. Cancelling releases any reserved pets back to the catalog.',
+            ),
+            const SizedBox(height: 16),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: SellerSummaryTile(label: 'Awaiting payment', value: '$pendingCount')),
+                const SizedBox(width: 12),
+                Expanded(child: SellerSummaryTile(label: 'Ready to hand over', value: '$paidCount')),
+              ],
+            ),
+            const SizedBox(height: 20),
+            FilterChipBar<String>(
+              options: filterOptions(_filters, rows, _statusOf),
+              selected: active,
+              onSelected: (value) => setState(() {
+                _filter = value;
+                _limit = kPageSize;
+              }),
+            ),
+            const SizedBox(height: 16),
+            if (data.customersError != null) ...[
+              NoticeBox.error(message: "Couldn't load customer names: ${data.customersError}"),
+              const SizedBox(height: 12),
+            ],
+            if (visible.isEmpty)
+              CardBox(
+                child: EmptyState(
+                  title: rows.isEmpty ? 'No orders yet' : 'Nothing here',
+                  description: rows.isEmpty
+                      ? 'Orders for your pets and products will show up here.'
+                      : 'No orders match this filter.',
                 ),
-              ),
-              const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  StatusPill(status: order.status, color: statusColor),
-                  const SizedBox(height: 8),
-                  Text(
-                    formatPrice(order.totalAmount),
-                    style: AppTheme.display(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.accent,
-                    ),
+              )
+            else ...[
+              for (final order in visible.take(shown))
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: SellerOrderCard(
+                    key: ValueKey(order.id),
+                    order: order,
+                    readOnly: readOnly,
+                    busyStatus: _busyOrderId == order.id ? _busyStatus : null,
+                    onAction: (status) => _move(order, status),
                   ),
-                ],
+                ),
+              LoadMoreButton(
+                shown: shown,
+                total: visible.length,
+                onPressed: () => setState(() => _limit += kPageSize),
               ),
             ],
-          ),
-          if (order.items.isNotEmpty) ...[
-            const SizedBox(height: 16),
-            const Divider(height: 1, color: AppColors.border),
-            const SizedBox(height: 12),
-            for (final item in order.items)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 3),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Expanded(
-                      child: RichText(
-                        text: TextSpan(
-                          style: AppTheme.body(fontSize: 14),
-                          children: [
-                            TextSpan(text: item.name),
-                            if (item.quantity > 1)
-                              TextSpan(
-                                text: ' × ${item.quantity}',
-                                style: AppTheme.body(fontSize: 14, color: AppColors.inkSoft),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    Text(
-                      formatPrice(item.price),
-                      style: AppTheme.body(fontSize: 14, color: AppColors.inkSoft),
-                    ),
-                  ],
-                ),
-              ),
           ],
-        ],
-      ),
+        );
+      },
     );
   }
 }

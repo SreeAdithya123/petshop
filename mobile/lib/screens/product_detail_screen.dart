@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -8,16 +10,18 @@ import '../repositories/repositories.dart';
 import '../state/auth_provider.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
+import '../widgets/content_width.dart';
 import '../widgets/pet_widgets.dart';
 import '../widgets/role_shell.dart';
 import '../widgets/shared_widgets.dart';
+import '../widgets/skeletons.dart';
 import '../widgets/ui_kit.dart';
-
-const _amber = Color(0xFFB45309);
+import 'store_screen.dart' show discardPendingOrder, stockColor, stockLabel;
 
 /// Mirrors src/pages/ProductDetail.jsx: loads one product (public columns and
 /// the shop's NAME only -- never its address or phone) and lets a signed-in
-/// user place a pickup order, paid in person.
+/// customer place a pickup order, paid in person. Out-of-stock products can't
+/// be ordered; pull to refresh reloads the product (and its stock).
 class ProductDetailScreen extends ConsumerStatefulWidget {
   final String productId;
   const ProductDetailScreen({super.key, required this.productId});
@@ -29,11 +33,12 @@ class ProductDetailScreen extends ConsumerStatefulWidget {
 class _ProductDetailScreenState extends ConsumerState<ProductDetailScreen> {
   Product? _product;
   bool _loading = true;
-  String? _loadError;
+  Object? _loadError;
 
   bool _purchasing = false;
   String? _purchaseError;
   bool _purchased = false;
+  String? _orderId;
 
   @override
   void initState() {
@@ -41,48 +46,57 @@ class _ProductDetailScreenState extends ConsumerState<ProductDetailScreen> {
     _load();
   }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _loadError = null;
-      _product = null;
-      _purchased = false;
-      _purchaseError = null;
-    });
+  /// Loads the product. A [quiet] reload (pull to refresh, or after a failed
+  /// order to pick up changed stock) keeps what is on screen and the order
+  /// state, and only replaces the product when it succeeds.
+  Future<void> _load({bool quiet = false}) async {
+    if (!quiet) {
+      setState(() {
+        _loading = true;
+        _loadError = null;
+        _product = null;
+        _purchased = false;
+        _purchaseError = null;
+        _orderId = null;
+      });
+    }
     try {
       final product = await ProductsRepository().getById(widget.productId);
       if (!mounted) return;
       setState(() {
         _product = product;
+        _loadError = null;
         _loading = false;
       });
-    } on PostgrestException catch (e) {
+    } catch (error) {
       if (!mounted) return;
+      // 22P02: the id in the link isn't a valid uuid, i.e. there is no such product.
+      final notFound = error is PostgrestException && error.code == '22P02';
       setState(() {
-        // 22P02: the id in the link isn't a valid uuid, i.e. there is no such product.
-        _loadError = e.code == '22P02' ? null : errorText(e);
         _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _loadError = errorText(e);
-        _loading = false;
+        if (notFound) {
+          _product = null;
+          _loadError = null;
+        } else if (!quiet || _product == null) {
+          _loadError = error;
+        }
       });
     }
   }
 
   Future<void> _handlePurchase() async {
-    final profile = ref.read(authControllerProvider).profile;
+    final auth = ref.read(authControllerProvider);
+    final profile = auth.profile;
     final product = _product;
-    if (profile == null || product == null || _purchasing) return;
+    if (profile == null || profile.role != 'customer' || product == null || _purchasing) return;
 
     setState(() {
       _purchasing = true;
       _purchaseError = null;
     });
+    String? orderId;
     try {
-      final orderId = await OrdersRepository().insert({
+      orderId = await OrdersRepository().insert({
         'customer_id': profile.id,
         'order_type': 'product_purchase',
         'status': 'pending',
@@ -96,101 +110,136 @@ class _ProductDetailScreenState extends ConsumerState<ProductDetailScreen> {
         'quantity': 1,
         'price_at_purchase': product.price,
       });
+    } catch (error) {
+      // Don't leave an empty pending order behind for the shop to puzzle over.
+      if (orderId != null) unawaited(discardPendingOrder(orderId));
       if (!mounted) return;
       setState(() {
-        _purchased = true;
         _purchasing = false;
+        _purchaseError = commerceErrorText(error);
       });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _purchaseError = errorText(e);
-        _purchasing = false;
-      });
+      // The stock or availability may have changed: show the latest.
+      unawaited(_load(quiet: true));
+      return;
     }
+    if (!mounted) return;
+    setState(() {
+      _purchasing = false;
+      _purchased = true;
+      _orderId = orderId;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    final auth = ref.watch(authControllerProvider);
-    final isSignedIn = auth.status == AuthStatus.signedIn && auth.profile != null;
     final product = _product;
 
     final Widget body;
     if (_loading) {
-      body = const _ProductSkeleton();
+      body = const _ProductDetailSkeleton();
     } else if (_loadError != null) {
-      body = Padding(
-        padding: kScreenPadding,
-        child: EmptyState(
+      body = ScrollableMessage(
+        child: CommerceRetryView(
           title: "We couldn't load that product",
-          description: _loadError,
-          action: ElevatedButton(onPressed: _load, child: const Text('Try again')),
+          error: _loadError,
+          onRetry: _load,
         ),
       );
     } else if (product == null) {
-      body = Padding(
-        padding: kScreenPadding,
-        child: EmptyState(
-          title: "We couldn't find that product",
-          action: ElevatedButton(
-            onPressed: () => context.go('/store'),
-            child: const Text('Browse the store'),
+      body = RefreshIndicator(
+        onRefresh: () => _load(quiet: true),
+        child: ScrollableMessage(
+          child: EmptyState(
+            title: "We couldn't find that product",
+            description: 'It may have been removed, or the link is out of date.',
+            action: ElevatedButton(
+              onPressed: () => context.go('/store'),
+              child: const Text('Browse the store'),
+            ),
           ),
         ),
       );
     } else {
-      body = _buildProduct(product, isSignedIn);
+      body = RefreshIndicator(
+        onRefresh: () => _load(quiet: true),
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: kScreenPadding,
+          children: [ContentWidth(maxWidth: 720, child: _buildProduct(product))],
+        ),
+      );
     }
 
-    return RoleShell(title: product?.name ?? 'Product', child: body);
+    return RoleShell(
+      title: product?.name ?? 'Product',
+      actions: const [CartAppBarAction()],
+      child: body,
+    );
   }
 
-  Widget _buildProduct(Product product, bool isSignedIn) {
-    final outOfStock = product.stockQuantity <= 0;
+  Widget _buildProduct(Product product) {
+    final stock = product.stockQuantity;
+    final outOfStock = stock <= 0;
     final unavailable = product.status != 'available' || outOfStock;
-    final description = product.description;
+    final description = product.description?.trim() ?? '';
     final shopName = product.shop?.name ?? '';
-    final photo = product.photoUrls.isEmpty ? null : product.photoUrls.first;
 
-    return ListView(
-      padding: kScreenPadding,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (photo != null) ...[
-          ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: AspectRatio(
-              aspectRatio: 16 / 9,
-              child: PetPhotoView(src: photo, species: ''),
+        if (product.photoUrls.isNotEmpty) ...[
+          PhotoGallery(
+            key: ValueKey(product.id),
+            photos: product.photoUrls,
+            label: 'Photos of ${product.name}',
+            statusLabel: unavailable ? (outOfStock ? 'Out of stock' : 'Unavailable') : null,
+            photoBuilder: (url, cacheWidth, label) => ProductPhotoView(
+              src: url,
+              category: product.category,
+              cacheWidth: cacheWidth,
+              semanticLabel: label,
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 20),
         ],
-        Row(
+        Wrap(
+          spacing: 10,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             Text(titleCase(product.category), style: AppTheme.body(color: AppColors.inkSoft)),
-            if (product.requiresPrescription) ...[
-              const SizedBox(width: 10),
-              const StatusPill(status: 'Prescription needed', color: _amber),
-            ],
+            if (product.requiresPrescription) const StatusPill(status: 'Prescription needed', color: kAmberTextColor),
           ],
         ),
         const SizedBox(height: 4),
-        Text(product.name, style: AppTheme.display(fontSize: 26, fontWeight: FontWeight.w700)),
+        Semantics(
+          header: true,
+          child: Text(product.name, style: AppTheme.display(fontSize: 26, fontWeight: FontWeight.w700)),
+        ),
         const SizedBox(height: 10),
         Text(
           formatPrice(product.price),
-          style: AppTheme.display(fontSize: 22, fontWeight: FontWeight.w700, color: AppColors.accent),
+          style: AppTheme.display(fontSize: 22, fontWeight: FontWeight.w700, color: kPetPriceColor),
         ),
-        if (description != null && description.trim().isNotEmpty) ...[
+        if (description.isNotEmpty) ...[
           const SizedBox(height: 14),
-          Text(description.trim(), style: AppTheme.body(color: AppColors.inkSoft)),
+          Text(description, style: AppTheme.body(color: AppColors.inkSoft).copyWith(height: 1.5)),
         ],
         const SizedBox(height: 8),
-        Text(
-          outOfStock ? 'Out of stock' : '${product.stockQuantity} in stock',
-          style: AppTheme.body(fontSize: 13, color: outOfStock ? AppColors.error : AppColors.inkSoft),
+        Semantics(
+          liveRegion: true,
+          child: Text(
+            stockLabel(product),
+            style: AppTheme.body(fontSize: 13.5, fontWeight: FontWeight.w600, color: stockColor(product)),
+          ),
         ),
+        if (product.requiresPrescription) ...[
+          const SizedBox(height: 16),
+          const NoticeBox.warning(
+            message: 'Prescription needed. Bring a valid prescription when you collect this item; the shop may '
+                'ask to see it before handing it over.',
+          ),
+        ],
         const SizedBox(height: 20),
         CardBox(
           padding: const EdgeInsets.all(14),
@@ -198,79 +247,140 @@ class _ProductDetailScreenState extends ConsumerState<ProductDetailScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (shopName.isNotEmpty) ...[
+                Text('Sold by', style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
                 Text(shopName, style: AppTheme.body(fontWeight: FontWeight.w600)),
-                const SizedBox(height: 4),
+                const SizedBox(height: 6),
               ],
               Text(
-                'The shop will confirm pickup details with you after you place the order.',
+                'The shop will confirm pickup details with you after you place the order. You pay in person at '
+                'pickup; nothing is charged online.',
                 style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
+              ),
+              const SizedBox(height: 4),
+              TextButton.icon(
+                onPressed: () => context.push(shopSupportRoute(shopId: product.shopId)),
+                style: TextButton.styleFrom(minimumSize: const Size(0, 48), padding: EdgeInsets.zero),
+                icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                label: const Text('Message the shop'),
               ),
             ],
           ),
         ),
         const SizedBox(height: 24),
-        if (_purchased)
-          SuccessPanel(
-            title: 'Order placed',
-            message: 'The shop will confirm pickup details with you. Pay in person at pickup.',
-            actions: [
-              ElevatedButton(
-                onPressed: () => context.go('/account/orders'),
-                child: const Text('View my orders'),
-              ),
-              OutlinedButton(
-                onPressed: () => context.go('/store'),
-                child: const Text('Keep browsing'),
-              ),
-            ],
-          )
-        else if (unavailable)
-          Text("This product isn't available right now.", style: AppTheme.body(color: AppColors.inkSoft))
-        else if (isSignedIn) ...[
-          LoadingButton(
-            label: 'Order for pickup',
-            loading: _purchasing,
-            expand: true,
-            onPressed: _handlePurchase,
+        _buildAction(product, unavailable: unavailable, outOfStock: outOfStock),
+      ],
+    );
+  }
+
+  Widget _buildAction(Product product, {required bool unavailable, required bool outOfStock}) {
+    if (_purchased) {
+      return SuccessPanel(
+        title: 'Order placed',
+        message: 'The shop will confirm pickup details with you. Pay in person at pickup; nothing was charged online.',
+        actions: [
+          ElevatedButton(
+            onPressed: () => context.go('/account/orders'),
+            child: const Text('View my orders'),
           ),
-          if (_purchaseError != null) ...[
-            const SizedBox(height: 10),
-            NoticeBox.error(message: _purchaseError!),
-          ],
-        ] else
-          const LoginPromptCard(
-            compact: true,
-            title: 'Log in to order',
-            description: 'Log in to order this product.',
+          OutlinedButton(
+            onPressed: () => context.push(shopSupportRoute(shopId: product.shopId, orderId: _orderId)),
+            child: const Text('Message the shop'),
           ),
+          TextButton(
+            onPressed: () => context.go('/store'),
+            child: const Text('Keep browsing'),
+          ),
+        ],
+      );
+    }
+
+    if (unavailable) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ElevatedButton(
+            onPressed: null,
+            style: ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(52)),
+            child: Text(outOfStock ? 'Out of stock' : 'Not available'),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            outOfStock
+                ? 'This product is out of stock right now. Pull down to refresh, or check back later.'
+                : "This product isn't available right now.",
+            style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
+          ),
+        ],
+      );
+    }
+
+    final auth = ref.watch(authControllerProvider);
+    if (auth.status == AuthStatus.loading) {
+      return const SkeletonBox(height: 52, radius: 12);
+    }
+    final profile = auth.status == AuthStatus.signedIn ? auth.profile : null;
+    if (profile == null) {
+      return const LoginPromptCard(
+        compact: true,
+        title: 'Log in to order',
+        description: 'Log in to order this product.',
+      );
+    }
+    if (profile.role != 'customer') {
+      return const NoticeBox(
+        message: 'Only customer accounts can order products. Log in with a customer account to order this item.',
+      );
+    }
+
+    final error = _purchaseError;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        LoadingButton(
+          label: 'Order for pickup · ${formatPrice(product.price)}',
+          loading: _purchasing,
+          expand: true,
+          onPressed: _handlePurchase,
+        ),
+        if (error != null) ...[
+          const SizedBox(height: 10),
+          Semantics(liveRegion: true, child: NoticeBox.error(message: error)),
+        ],
       ],
     );
   }
 }
 
-class _ProductSkeleton extends StatelessWidget {
-  const _ProductSkeleton();
+/// Placeholder shown while the product loads.
+class _ProductDetailSkeleton extends StatelessWidget {
+  const _ProductDetailSkeleton();
 
   @override
   Widget build(BuildContext context) {
-    return const SkeletonPulse(
-      child: SingleChildScrollView(
-        physics: NeverScrollableScrollPhysics(),
+    return Semantics(
+      label: 'Loading product',
+      child: ListView(
+        physics: const NeverScrollableScrollPhysics(),
         padding: kScreenPadding,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SkeletonBox(width: 70, height: 14),
-            SizedBox(height: 12),
-            SkeletonBox(width: 220, height: 28),
-            SizedBox(height: 14),
-            SkeletonBox(width: 100, height: 24),
-            SizedBox(height: 22),
-            SkeletonBox(height: 14),
-            SizedBox(height: 8),
-            SkeletonBox(width: 260, height: 14),
-          ],
-        ),
+        children: const [
+          ContentWidth(
+            maxWidth: 720,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SkeletonBox(width: 70, height: 14),
+                SizedBox(height: 12),
+                SkeletonBox(width: 220, height: 28),
+                SizedBox(height: 14),
+                SkeletonBox(width: 100, height: 24),
+                SizedBox(height: 22),
+                SkeletonBox(height: 14),
+                SizedBox(height: 8),
+                SkeletonBox(width: 260, height: 14),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -13,14 +13,29 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// [CartController.prunePets] drops pets the catalog no longer lists.
 /// Persisted locally via SharedPreferences (the web app's equivalent used
 /// localStorage), same "no network calls here, UI-only state" boundary.
+///
+/// Whatever is found in storage -- corrupt JSON, an older shape, wrong types,
+/// duplicates -- is sanitised on load; it can never crash the app.
 class CartLine {
   final String itemType; // pet | product
   final String itemId;
   const CartLine(this.itemType, this.itemId);
 
   Map<String, String> toJson() => {'itemType': itemType, 'itemId': itemId};
+
   factory CartLine.fromJson(Map<String, dynamic> json) =>
       CartLine(json['itemType'] as String, json['itemId'] as String);
+
+  /// Parses one stored entry, or null when it isn't a usable line.
+  static CartLine? tryParse(Object? entry) {
+    if (entry is! Map) return null;
+    final type = entry['itemType'];
+    final id = entry['itemId'];
+    if (type is! String || id is! String) return null;
+    if (type != 'pet' && type != 'product') return null;
+    if (id.trim().isEmpty) return null;
+    return CartLine(type, id);
+  }
 
   @override
   bool operator ==(Object other) =>
@@ -32,38 +47,49 @@ class CartLine {
 class CartController extends ChangeNotifier {
   static const _cartKey = 'petstore.cart.v1';
 
+  /// A cart this large is a bug or tampered storage, not a shopper.
+  static const _maxLines = 100;
+
   List<CartLine> items = [];
+  bool _disposed = false;
 
   CartController() {
     _load();
   }
 
+  /// Number of lines in the cart (for the app-bar badge).
+  int get count => items.length;
+
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
+
   Future<void> _load() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final stored = _decode(prefs.getString(_cartKey));
+      final stored = _decode(prefs.get(_cartKey));
       // Keep anything added while the stored cart was still being read.
-      items = [...stored, ...items.where((line) => !stored.contains(line))];
+      final merged = <CartLine>[...stored];
+      for (final line in items) {
+        if (!merged.contains(line)) merged.add(line);
+      }
+      items = merged.length > _maxLines ? merged.sublist(0, _maxLines) : merged;
     } catch (_) {
       // Unreadable storage: carry on with the in-memory cart.
     }
-    notifyListeners();
+    _notify();
   }
 
   /// Malformed or old-shaped storage must never break startup.
-  List<CartLine> _decode(String? raw) {
-    if (raw == null) return [];
+  List<CartLine> _decode(Object? raw) {
+    if (raw is! String || raw.isEmpty) return [];
     try {
-      final list = jsonDecode(raw) as List;
+      final list = jsonDecode(raw);
+      if (list is! List) return [];
       final lines = <CartLine>[];
       for (final entry in list) {
-        if (entry is! Map<String, dynamic>) continue;
-        final type = entry['itemType'];
-        final id = entry['itemId'];
-        if (type is String && id is String && id.isNotEmpty) {
-          final line = CartLine(type, id);
-          if (!lines.contains(line)) lines.add(line);
-        }
+        final line = CartLine.tryParse(entry);
+        if (line != null && !lines.contains(line)) lines.add(line);
       }
       return lines;
     } catch (_) {
@@ -84,15 +110,15 @@ class CartController extends ChangeNotifier {
 
   Future<void> addToCart(String itemType, String itemId) async {
     final line = CartLine(itemType, itemId);
-    if (items.contains(line)) return;
+    if (items.contains(line) || items.length >= _maxLines) return;
     items = [...items, line];
-    notifyListeners();
+    _notify();
     await _persist();
   }
 
   Future<void> removeFromCart(String itemType, String itemId) async {
     items = items.where((e) => e != CartLine(itemType, itemId)).toList();
-    notifyListeners();
+    _notify();
     await _persist();
   }
 
@@ -103,15 +129,21 @@ class CartController extends ChangeNotifier {
     final removed = items.length - kept.length;
     if (removed == 0) return 0;
     items = kept;
-    notifyListeners();
+    _notify();
     await _persist();
     return removed;
   }
 
   Future<void> clearCart() async {
     items = [];
-    notifyListeners();
+    _notify();
     await _persist();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
   }
 }
 

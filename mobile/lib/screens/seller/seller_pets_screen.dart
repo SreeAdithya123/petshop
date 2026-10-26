@@ -1,216 +1,224 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../models/models.dart';
-import '../../repositories/repositories.dart';
 import '../../services/supabase_service.dart';
-import '../../state/my_shop_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
 import '../../widgets/pet_widgets.dart';
-import '../../widgets/role_shell.dart';
+import '../../widgets/seller/seller_common.dart';
+import '../../widgets/seller_scaffold.dart';
 import '../../widgets/shared_widgets.dart';
 import '../../widgets/ui_kit.dart';
-
-const _notApplied = "That didn't go through — its status may have changed.";
 
 /// Ports src/pages/seller/Pets.jsx: a shop owner's own pet listings with an
 /// Add / Edit form (name, gender, species, breed, age, price...) in a bottom
 /// sheet and per-row Mark sold / Mark available / Edit / Delete actions.
-class SellerPetsScreen extends ConsumerWidget {
+class SellerPetsScreen extends StatelessWidget {
   const SellerPetsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final shopAsync = ref.watch(myShopProvider);
-
-    return RoleShell(
+  Widget build(BuildContext context) {
+    return SellerScaffold(
       title: 'Pets',
-      child: shopAsync.when(
-        loading: () => const LoadingView(),
-        error: (error, _) => _LoadFailure(
-          message: "Couldn't load your shop: ${errorText(error)}",
-          onRetry: () => ref.invalidate(myShopProvider),
-        ),
-        data: (shop) {
-          if (shop == null) {
-            return Padding(
-              padding: kScreenPadding,
-              child: EmptyState(
-                title: "You haven't set up your shop yet",
-                description: 'Create your shop profile to start listing pets and products.',
-                action: ElevatedButton(
-                  onPressed: () => context.push('/seller/store'),
-                  child: const Text('Set up your shop'),
-                ),
-              ),
-            );
-          }
-          return _PetsView(shop: shop);
-        },
-      ),
+      subtitle: 'Your pet listings.',
+      builder: (context, shop) => _PetsWorkspace(shop: shop),
     );
   }
 }
 
-class _PetsView extends StatefulWidget {
-  final Shop shop;
-  const _PetsView({required this.shop});
+const _filters = <StatusFilter>[
+  StatusFilter('all', 'All'),
+  StatusFilter('available', 'Available'),
+  StatusFilter('reserved', 'Reserved'),
+  StatusFilter('sold', 'Sold'),
+];
 
-  @override
-  State<_PetsView> createState() => _PetsViewState();
+const _statusLabels = {'available': 'Available', 'reserved': 'Reserved', 'sold': 'Sold'};
+
+String _statusOf(Pet pet) => pet.status;
+
+Future<List<Pet>> _fetchPets(String shopId) async {
+  final rows = await fetchAllRows(() => SupabaseService.client.from('pets').select().eq('shop_id', shopId));
+  final pets = rows.map(Pet.fromJson).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  return pets;
 }
 
-class _PetsViewState extends State<_PetsView> {
-  List<Pet> _pets = const [];
-  bool _loading = true;
-  bool _loaded = false;
-  String? _error;
+class _PetsWorkspace extends ConsumerStatefulWidget {
+  final Shop shop;
+  const _PetsWorkspace({required this.shop});
+
+  @override
+  ConsumerState<_PetsWorkspace> createState() => _PetsWorkspaceState();
+}
+
+class _PetsWorkspaceState extends ConsumerState<_PetsWorkspace> {
+  late final SellerQuery<List<Pet>> _query;
+  String _filter = 'all';
+  int _limit = kPageSize;
   String? _busyId;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    final shopId = widget.shop.id;
+    _query = SellerQuery<List<Pet>>(() => _fetchPets(shopId));
   }
 
-  Future<void> _load() async {
-    try {
-      final pets = await PetsRepository().listByShop(widget.shop.id);
-      if (!mounted) return;
-      setState(() {
-        _pets = pets;
-        _loaded = true;
-        _error = null;
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      if (_loaded) {
-        // Keep showing the list we already have; just say the refresh failed.
-        showSnack(context, errorText(e), error: true);
-      } else {
-        setState(() {
-          _error = errorText(e);
-          _loading = false;
-        });
-      }
-    }
-  }
-
-  void _retry() {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    _load();
+  @override
+  void dispose() {
+    _query.dispose();
+    super.dispose();
   }
 
   Future<void> _openForm([Pet? pet]) async {
     final saved = await showFormSheet<bool>(
       context,
       title: pet == null ? 'Add a pet' : 'Edit pet',
+      description: pet == null ? 'Customers can reserve it once your shop is approved.' : null,
       builder: (sheetContext) => _PetForm(shopId: widget.shop.id, pet: pet),
     );
     if (saved != true || !mounted) return;
     showSnack(context, pet == null ? 'Pet added.' : 'Pet updated.');
-    await _load();
+    _query.reload();
   }
 
-  Future<void> _changeStatus(Pet pet, String status) async {
+  Future<void> _setStatus(Pet pet, String status) async {
+    if (_busyId != null) return;
+    final selling = status == 'sold';
+    final confirmed = await confirmAction(
+      context,
+      title: selling ? 'Mark ${pet.displayName} as sold?' : 'Make ${pet.displayName} available again?',
+      message: selling
+          ? 'It will no longer be offered to customers.'
+          : 'The reservation stops holding this pet and customers can reserve it again. '
+              'To release a specific customer\'s reservation, cancel their order from Orders instead.',
+      confirmLabel: selling ? 'Mark sold' : 'Make available',
+    );
+    if (!confirmed || !mounted) return;
+
     setState(() => _busyId = pet.id);
-    try {
-      final rows = await SupabaseService.client.from('pets').update({'status': status}).eq('id', pet.id).select('id');
-      if (!mounted) return;
-      if (rows.isEmpty) {
-        showSnack(context, _notApplied, error: true);
-      } else {
-        showSnack(context, status == 'sold' ? 'Marked as sold.' : 'Marked as available.');
-      }
-      await _load();
-    } catch (e) {
-      if (!mounted) return;
-      showSnack(context, errorText(e), error: true);
-    } finally {
-      if (mounted) setState(() => _busyId = null);
+    // Guard on the status the card showed so a newer change isn't overwritten.
+    final failure = await updateRow('pets', pet.id, {'status': status}, match: {'status': pet.status});
+    if (!mounted) return;
+    setState(() => _busyId = null);
+
+    if (failure != null) {
+      showSnack(context, failure, error: true);
+      // A reservation or sale may have changed the pet meanwhile: show its real state.
+      if (failure == kNothingChanged) _query.reload();
+      return;
     }
+    showSnack(context, selling ? 'Marked as sold.' : 'Marked as available.');
+    _query.reload();
   }
 
   Future<void> _delete(Pet pet) async {
+    if (_busyId != null) return;
     final confirmed = await confirmAction(
       context,
       title: 'Delete this listing?',
-      message: '${pet.displayName} will be removed from your shop. This cannot be undone.',
+      message: '${pet.displayName} will be removed from your shop. This can\'t be undone.',
       confirmLabel: 'Delete',
       destructive: true,
     );
     if (!confirmed || !mounted) return;
 
     setState(() => _busyId = pet.id);
-    try {
-      final rows = await SupabaseService.client.from('pets').delete().eq('id', pet.id).select('id');
-      if (!mounted) return;
-      if (rows.isEmpty) {
-        showSnack(context, "That didn't go through — it may already have been removed.", error: true);
-      } else {
-        showSnack(context, 'Listing deleted.');
-      }
-      await _load();
-    } catch (e) {
-      if (!mounted) return;
-      showSnack(context, errorText(e), error: true);
-    } finally {
-      if (mounted) setState(() => _busyId = null);
+    final failure = await deleteRow('pets', pet.id);
+    if (!mounted) return;
+    setState(() => _busyId = null);
+
+    if (failure != null) {
+      showSnack(context, failure, error: true);
+      return;
     }
+    showSnack(context, 'Listing deleted.');
+    _query.reload();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const LoadingView();
-    if (_error != null) return _LoadFailure(message: "Couldn't load your pets: $_error", onRetry: _retry);
+    listenForShopRefresh(ref, _query.reload);
+    final readOnly = widget.shop.status == 'suspended';
 
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: kScreenPadding,
-        children: [
-          ScreenHeader(
-            title: 'Pets',
-            subtitle: 'Your pet listings.',
-            trailing: ElevatedButton.icon(
-              onPressed: () => _openForm(),
-              icon: const Icon(Icons.add, size: 18),
-              label: const Text('Add a pet'),
-            ),
-          ),
-          const SizedBox(height: 20),
-          if (_pets.isEmpty)
-            const EmptyState(
-              title: 'No pets listed yet',
-              description: 'Add your first pet to start reaching customers.',
-            )
-          else
-            for (final pet in _pets) ...[
-              _PetCard(
-                pet: pet,
-                busy: _busyId == pet.id,
-                onMarkSold: () => _changeStatus(pet, 'sold'),
-                onMarkAvailable: () => _changeStatus(pet, 'available'),
-                onEdit: () => _openForm(pet),
-                onDelete: () => _delete(pet),
-              ),
-              const SizedBox(height: 12),
+    return SellerQueryPanel<List<Pet>>(
+      query: _query,
+      what: 'your pets',
+      builder: (context, pets) {
+        final visible = applyStatusFilter(_filters, _filter, pets, _statusOf);
+        final shown = math.min(_limit, visible.length);
+        final addButton = ElevatedButton.icon(
+          onPressed: () => _openForm(),
+          icon: const Icon(Icons.add, size: 18),
+          label: const Text('Add a pet'),
+        );
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (!readOnly && pets.isNotEmpty) ...[
+              Align(alignment: Alignment.centerLeft, child: addButton),
+              const SizedBox(height: 16),
             ],
-        ],
-      ),
+            if (pets.isNotEmpty) ...[
+              FilterChipBar<String>(
+                options: filterOptions(_filters, pets, _statusOf),
+                selected: _filter,
+                onSelected: (value) => setState(() {
+                  _filter = value;
+                  _limit = kPageSize;
+                }),
+              ),
+              const SizedBox(height: 16),
+            ],
+            if (pets.isEmpty)
+              CardBox(
+                child: EmptyState(
+                  title: 'No pets listed yet',
+                  description: 'Add your first pet to start reaching customers.',
+                  action: readOnly ? null : addButton,
+                ),
+              )
+            else if (visible.isEmpty)
+              const CardBox(
+                child: EmptyState(title: 'Nothing here', description: 'No pets match this filter.'),
+              )
+            else ...[
+              for (final pet in visible.take(shown))
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: _PetCard(
+                    key: ValueKey(pet.id),
+                    pet: pet,
+                    readOnly: readOnly,
+                    busy: _busyId == pet.id,
+                    onMarkSold: () => _setStatus(pet, 'sold'),
+                    onMarkAvailable: () => _setStatus(pet, 'available'),
+                    onEdit: () => _openForm(pet),
+                    onDelete: () => _delete(pet),
+                  ),
+                ),
+              LoadMoreButton(
+                shown: shown,
+                total: visible.length,
+                onPressed: () => setState(() => _limit += kPageSize),
+              ),
+            ],
+          ],
+        );
+      },
     );
   }
 }
 
 class _PetCard extends StatelessWidget {
   final Pet pet;
+  final bool readOnly;
   final bool busy;
   final VoidCallback onMarkSold;
   final VoidCallback onMarkAvailable;
@@ -218,7 +226,9 @@ class _PetCard extends StatelessWidget {
   final VoidCallback onDelete;
 
   const _PetCard({
+    super.key,
     required this.pet,
+    required this.readOnly,
     required this.busy,
     required this.onMarkSold,
     required this.onMarkAvailable,
@@ -234,23 +244,7 @@ class _PetCard extends StatelessWidget {
       if (pet.gender != null && pet.gender!.isNotEmpty) pet.gender!,
       formatAge(pet.ageMonths),
     ].where((part) => part.isNotEmpty).join(' · ');
-
-    final compactOutlined = OutlinedButton.styleFrom(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      minimumSize: const Size(0, 36),
-      textStyle: AppTheme.body(fontSize: 13, fontWeight: FontWeight.w600),
-    );
-    final compactText = TextButton.styleFrom(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      minimumSize: const Size(0, 36),
-      textStyle: AppTheme.body(fontSize: 13, fontWeight: FontWeight.w600),
-    );
-    final compactDelete = TextButton.styleFrom(
-      foregroundColor: AppColors.error,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      minimumSize: const Size(0, 36),
-      textStyle: AppTheme.body(fontSize: 13, fontWeight: FontWeight.w600),
-    );
+    final title = name.isNotEmpty ? name : breedLine;
 
     return CardBox(
       child: Column(
@@ -267,6 +261,8 @@ class _PetCard extends StatelessWidget {
                   child: PetPhotoView(
                     src: pet.photoUrls.isNotEmpty ? pet.photoUrls.first : null,
                     species: pet.species,
+                    cacheWidth: 112,
+                    semanticLabel: 'Photo of $title',
                   ),
                 ),
               ),
@@ -276,8 +272,8 @@ class _PetCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      name.isNotEmpty ? name : breedLine,
-                      maxLines: 1,
+                      title,
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: AppTheme.display(fontSize: 16, fontWeight: FontWeight.w600),
                     ),
@@ -298,7 +294,7 @@ class _PetCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              StatusBadge(status: pet.status, label: titleCase(pet.status)),
+              StatusBadge(status: pet.status, label: _statusLabels[pet.status] ?? titleCase(pet.status)),
             ],
           ),
           const SizedBox(height: 10),
@@ -306,36 +302,54 @@ class _PetCard extends StatelessWidget {
             formatPrice(pet.price),
             style: AppTheme.body(fontWeight: FontWeight.w600, color: AppColors.accent),
           ),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 4,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              if (pet.status == 'available')
-                OutlinedButton(
-                  style: compactOutlined,
-                  onPressed: busy ? null : onMarkSold,
-                  child: const Text('Mark sold'),
-                ),
-              if (pet.status == 'reserved')
-                OutlinedButton(
-                  style: compactOutlined,
-                  onPressed: busy ? null : onMarkAvailable,
-                  child: const Text('Mark available'),
-                ),
-              TextButton(
-                style: compactText,
-                onPressed: busy ? null : onEdit,
-                child: const Text('Edit'),
+          if (pet.status == 'reserved') ...[
+            const SizedBox(height: 8),
+            Text(
+              'A customer has reserved this pet. Mark their order paid or handed over, or cancel it, from Orders.',
+              style: AppTheme.body(fontSize: 12.5, color: AppColors.inkSoft),
+            ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: () => context.push('/seller/orders'),
+                child: const Text('Go to Orders'),
               ),
-              TextButton(
-                style: compactDelete,
-                onPressed: busy ? null : onDelete,
-                child: const Text('Delete'),
-              ),
-            ],
-          ),
+            ),
+          ],
+          if (!readOnly) ...[
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                if (pet.status == 'available')
+                  OutlinedButton(
+                    onPressed: busy ? null : onMarkSold,
+                    child: const Text('Mark sold'),
+                  ),
+                if (pet.status == 'reserved')
+                  OutlinedButton(
+                    onPressed: busy ? null : onMarkAvailable,
+                    child: const Text('Mark available'),
+                  ),
+                TextButton(
+                  onPressed: busy ? null : onEdit,
+                  child: const Text('Edit'),
+                ),
+                TextButton(
+                  onPressed: busy ? null : onDelete,
+                  style: TextButton.styleFrom(foregroundColor: AppColors.error),
+                  child: const Text('Delete'),
+                ),
+                if (busy)
+                  Semantics(
+                    label: 'Saving',
+                    child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+                  ),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -352,216 +366,235 @@ class _PetForm extends StatefulWidget {
   State<_PetForm> createState() => _PetFormState();
 }
 
-String _numberText(num value) => value == value.roundToDouble() ? value.round().toString() : value.toString();
-
-num? _parseNonNegative(String raw) {
-  final value = num.tryParse(raw.trim());
-  if (value == null || !value.isFinite || value < 0) return null;
-  return value;
-}
-
 class _PetFormState extends State<_PetForm> {
-  final _formKey = GlobalKey<FormState>();
-  late final TextEditingController _nameCtrl;
-  late final TextEditingController _speciesCtrl;
-  late final TextEditingController _breedCtrl;
-  late final TextEditingController _ageCtrl;
-  late final TextEditingController _priceCtrl;
-  late final TextEditingController _descriptionCtrl;
-  late final TextEditingController _photoUrlsCtrl;
+  late final TextEditingController _name;
+  late final TextEditingController _species;
+  late final TextEditingController _breed;
+  late final TextEditingController _age;
+  late final TextEditingController _price;
+  late final TextEditingController _description;
+  late final TextEditingController _photos;
   late String _gender; // '' = Unknown (stored as null)
+
+  String? _nameError;
+  String? _speciesError;
+  String? _breedError;
+  String? _ageError;
+  String? _priceError;
+  String? _photosError;
+  String? _formError;
   bool _submitting = false;
-  String _formError = '';
+
+  bool get _editing => widget.pet != null;
 
   @override
   void initState() {
     super.initState();
     final pet = widget.pet;
-    _nameCtrl = TextEditingController(text: pet?.name ?? '');
-    _speciesCtrl = TextEditingController(text: pet?.species ?? '');
-    _breedCtrl = TextEditingController(text: pet?.breed ?? '');
-    _ageCtrl = TextEditingController(text: pet == null ? '' : '${pet.ageMonths}');
-    _priceCtrl = TextEditingController(text: pet == null ? '' : _numberText(pet.price));
-    _descriptionCtrl = TextEditingController(text: pet?.description ?? '');
-    _photoUrlsCtrl = TextEditingController(text: pet?.photoUrls.join(', ') ?? '');
+    _name = TextEditingController(text: pet?.name ?? '');
+    _species = TextEditingController(text: pet?.species ?? '');
+    _breed = TextEditingController(text: pet?.breed ?? '');
+    _age = TextEditingController(text: pet == null ? '' : '${pet.ageMonths}');
+    _price = TextEditingController(text: pet == null ? '' : plainNumber(pet.price));
+    _description = TextEditingController(text: pet?.description ?? '');
+    _photos = TextEditingController(text: pet?.photoUrls.join(', ') ?? '');
     final gender = pet?.gender;
     _gender = (gender == 'Male' || gender == 'Female') ? gender! : '';
   }
 
   @override
   void dispose() {
-    _nameCtrl.dispose();
-    _speciesCtrl.dispose();
-    _breedCtrl.dispose();
-    _ageCtrl.dispose();
-    _priceCtrl.dispose();
-    _descriptionCtrl.dispose();
-    _photoUrlsCtrl.dispose();
+    _name.dispose();
+    _species.dispose();
+    _breed.dispose();
+    _age.dispose();
+    _price.dispose();
+    _description.dispose();
+    _photos.dispose();
     super.dispose();
   }
 
-  String? _required(String? value, String message) => (value ?? '').trim().isEmpty ? message : null;
+  bool _validate() {
+    String? nameError;
+    String? speciesError;
+    String? breedError;
+    String? ageError;
+    String? priceError;
+
+    if (_name.text.trim().isEmpty) nameError = 'Enter a name for this pet.';
+    if (_species.text.trim().isEmpty) speciesError = 'Enter a species, like Dog or Cat.';
+    if (_breed.text.trim().isEmpty) breedError = 'Enter a breed.';
+
+    final ageText = _age.text.trim();
+    final months = int.tryParse(ageText);
+    if (ageText.isEmpty) {
+      ageError = "Enter the pet's age in months.";
+    } else if (months == null || months < 0 || months > 600) {
+      ageError = 'Enter a whole number of months (0 to 600).';
+    }
+
+    final priceText = _price.text.trim();
+    final price = parseAmount(priceText);
+    if (priceText.isEmpty) {
+      priceError = 'Enter a price.';
+    } else if (price == null || price <= 0) {
+      priceError = 'Price must be greater than zero.';
+    }
+
+    final photosError = photoUrlsError(_photos.text);
+
+    setState(() {
+      _nameError = nameError;
+      _speciesError = speciesError;
+      _breedError = breedError;
+      _ageError = ageError;
+      _priceError = priceError;
+      _photosError = photosError;
+    });
+    return nameError == null &&
+        speciesError == null &&
+        breedError == null &&
+        ageError == null &&
+        priceError == null &&
+        photosError == null;
+  }
 
   Future<void> _submit() async {
     if (_submitting) return;
-    setState(() => _formError = '');
-    if (!(_formKey.currentState?.validate() ?? false)) return;
+    FocusScope.of(context).unfocus();
+    setState(() => _formError = null);
+    if (!_validate()) return;
+
+    final description = _description.text.trim();
+    final payload = <String, dynamic>{
+      'name': _name.text.trim(),
+      'gender': _gender.isEmpty ? null : _gender,
+      'species': _species.text.trim(),
+      'breed': _breed.text.trim(),
+      'age_months': int.parse(_age.text.trim()),
+      'price': parseAmount(_price.text)!,
+      'description': description.isEmpty ? null : description,
+      'photo_urls': parseUrlList(_photos.text),
+    };
 
     setState(() => _submitting = true);
-    try {
-      final description = _descriptionCtrl.text.trim();
-      final payload = <String, dynamic>{
-        'name': _nameCtrl.text.trim(),
-        'gender': _gender.isEmpty ? null : _gender,
-        'species': _speciesCtrl.text.trim(),
-        'breed': _breedCtrl.text.trim(),
-        'age_months': _parseNonNegative(_ageCtrl.text)!.round(),
-        'price': _parseNonNegative(_priceCtrl.text)!,
-        'description': description.isEmpty ? null : description,
-        'photo_urls': _photoUrlsCtrl.text
-            .split(',')
-            .map((url) => url.trim())
-            .where((url) => url.isNotEmpty)
-            .toList(),
-      };
+    final pet = widget.pet;
+    // The database forces the shop, status and any seller-protected columns.
+    final failure = pet == null
+        ? await insertRow('pets', {'shop_id': widget.shopId, ...payload})
+        : await updateRow('pets', pet.id, payload);
+    if (!mounted) return;
 
-      final pet = widget.pet;
-      if (pet == null) {
-        await PetsRepository().insert({'shop_id': widget.shopId, ...payload});
-      } else {
-        final rows = await SupabaseService.client.from('pets').update(payload).eq('id', pet.id).select('id');
-        if (rows.isEmpty) {
-          throw Exception("That didn't go through — this listing may have been removed.");
-        }
-      }
-
-      if (!mounted) return;
-      Navigator.of(context).pop(true);
-    } catch (e) {
-      if (!mounted) return;
+    if (failure != null) {
       setState(() {
-        _formError = errorText(e);
         _submitting = false;
+        _formError = failure;
       });
+      return;
     }
+    Navigator.of(context).pop(true);
   }
 
   @override
   Widget build(BuildContext context) {
-    final editing = widget.pet != null;
-
-    return Form(
-      key: _formKey,
+    final enabled = !_submitting;
+    return PopScope(
+      canPop: !_submitting,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TextFormField(
-            controller: _nameCtrl,
+          TextField(
+            controller: _name,
+            enabled: enabled,
             textCapitalization: TextCapitalization.words,
-            decoration: const InputDecoration(labelText: 'Name'),
-            validator: (value) => _required(value, 'Enter a name for this pet.'),
+            inputFormatters: [LengthLimitingTextInputFormatter(60)],
+            decoration: InputDecoration(labelText: 'Name', errorText: _nameError, errorMaxLines: 2),
           ),
           const SizedBox(height: 14),
           DropdownButtonFormField<String>(
             initialValue: _gender,
+            isExpanded: true,
             decoration: const InputDecoration(labelText: 'Gender'),
             items: const [
               DropdownMenuItem(value: '', child: Text('Unknown')),
               DropdownMenuItem(value: 'Male', child: Text('Male')),
               DropdownMenuItem(value: 'Female', child: Text('Female')),
             ],
-            onChanged: (value) => setState(() => _gender = value ?? ''),
+            onChanged: enabled ? (value) => setState(() => _gender = value ?? '') : null,
           ),
           const SizedBox(height: 14),
-          TextFormField(
-            controller: _speciesCtrl,
+          TextField(
+            controller: _species,
+            enabled: enabled,
             textCapitalization: TextCapitalization.words,
-            decoration: const InputDecoration(labelText: 'Species'),
-            validator: (value) => _required(value, 'Enter a species.'),
+            inputFormatters: [LengthLimitingTextInputFormatter(40)],
+            decoration: InputDecoration(labelText: 'Species', errorText: _speciesError, errorMaxLines: 2),
           ),
           const SizedBox(height: 14),
-          TextFormField(
-            controller: _breedCtrl,
+          TextField(
+            controller: _breed,
+            enabled: enabled,
             textCapitalization: TextCapitalization.words,
-            decoration: const InputDecoration(labelText: 'Breed'),
-            validator: (value) => _required(value, 'Enter a breed.'),
+            inputFormatters: [LengthLimitingTextInputFormatter(60)],
+            decoration: InputDecoration(labelText: 'Breed', errorText: _breedError, errorMaxLines: 2),
           ),
           const SizedBox(height: 14),
-          TextFormField(
-            controller: _ageCtrl,
+          TextField(
+            controller: _age,
+            enabled: enabled,
             keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'Age (months)'),
-            validator: (value) {
-              if ((value ?? '').trim().isEmpty) return "Enter the pet's age in months.";
-              return _parseNonNegative(value!) == null ? 'Enter a valid age in months.' : null;
-            },
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(3)],
+            decoration: InputDecoration(labelText: 'Age (months)', errorText: _ageError, errorMaxLines: 2),
           ),
           const SizedBox(height: 14),
-          TextFormField(
-            controller: _priceCtrl,
+          TextField(
+            controller: _price,
+            enabled: enabled,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: const InputDecoration(labelText: 'Price (INR)'),
-            validator: (value) {
-              if ((value ?? '').trim().isEmpty) return 'Enter a price.';
-              return _parseNonNegative(value!) == null ? 'Enter a valid price.' : null;
-            },
+            inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+            decoration: InputDecoration(
+              labelText: 'Price (INR)',
+              prefixText: '₹ ',
+              errorText: _priceError,
+              errorMaxLines: 2,
+            ),
           ),
           const SizedBox(height: 14),
-          TextFormField(
-            controller: _descriptionCtrl,
+          TextField(
+            controller: _description,
+            enabled: enabled,
             minLines: 3,
             maxLines: 5,
             textCapitalization: TextCapitalization.sentences,
-            decoration: const InputDecoration(labelText: 'Description'),
+            decoration: const InputDecoration(labelText: 'Description', alignLabelWithHint: true),
           ),
           const SizedBox(height: 14),
-          TextFormField(
-            controller: _photoUrlsCtrl,
+          TextField(
+            controller: _photos,
+            enabled: enabled,
             keyboardType: TextInputType.url,
-            decoration: const InputDecoration(
+            autocorrect: false,
+            decoration: InputDecoration(
               labelText: 'Photo URLs',
               hintText: 'https://example.com/photo1.jpg, https://example.com/photo2.jpg',
+              helperText: 'Separate multiple links with commas.',
+              errorText: _photosError,
+              errorMaxLines: 2,
             ),
           ),
-          const SizedBox(height: 6),
-          Text('Separate multiple URLs with commas.', style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
-          if (_formError.isNotEmpty) ...[
+          if (_formError != null) ...[
             const SizedBox(height: 14),
-            NoticeBox.error(message: _formError),
+            NoticeBox.error(message: _formError!),
           ],
           const SizedBox(height: 20),
           LoadingButton(
-            label: editing ? 'Save changes' : 'Add pet',
+            label: _editing ? 'Save changes' : 'Add pet',
             loading: _submitting,
             expand: true,
             onPressed: _submit,
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// Centered "couldn't load" note with a retry button.
-class _LoadFailure extends StatelessWidget {
-  final String message;
-  final VoidCallback onRetry;
-  const _LoadFailure({required this.message, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(message, style: AppTheme.body(color: AppColors.error), textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            OutlinedButton(onPressed: onRetry, child: const Text('Try again')),
-          ],
-        ),
       ),
     );
   }

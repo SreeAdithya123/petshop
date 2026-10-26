@@ -8,6 +8,7 @@ import '../../state/auth_provider.dart';
 import '../../state/catalog_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
+import '../pet_widgets.dart';
 import '../ui_kit.dart';
 
 /// Bottom-sheet version of src/components/pets/GiftPetModal.jsx: reserve
@@ -45,7 +46,7 @@ final _nonDigits = RegExp(r'\D');
 
 /// Accepts an email address or a phone number (7-15 digits, common
 /// separators allowed), like isEmailOrPhone in the web modal.
-bool _isEmailOrPhone(String value) {
+bool isEmailOrPhone(String value) {
   if (_emailPattern.hasMatch(value)) return true;
   final digits = value.replaceAll(_nonDigits, '');
   return _phonePattern.hasMatch(value) && digits.length >= 7 && digits.length <= 15;
@@ -88,7 +89,7 @@ class _GiftPetFormState extends ConsumerState<_GiftPetForm> {
     final nameError = recipientName.isEmpty ? "Enter the recipient's name." : null;
     final contactError = contact.isEmpty
         ? "Enter the recipient's email or phone number."
-        : (_isEmailOrPhone(contact) ? null : 'Enter a valid email address or phone number.');
+        : (isEmailOrPhone(contact) ? null : 'Enter a valid email address or phone number.');
     setState(() {
       _nameError = nameError;
       _contactError = contactError;
@@ -115,7 +116,7 @@ class _GiftPetFormState extends ConsumerState<_GiftPetForm> {
       if (!mounted) return;
       setState(() {
         _submitting = false;
-        _submitError = errorText(error);
+        _submitError = commerceErrorText(error);
       });
     }
   }
@@ -162,6 +163,10 @@ class _GiftPetFormState extends ConsumerState<_GiftPetForm> {
         ElevatedButton(
           onPressed: () => _closeThen((router) => router.push('/account/orders')),
           child: const Text('View my orders'),
+        ),
+        OutlinedButton(
+          onPressed: () => _closeThen((router) => router.push(shopSupportRoute(shopId: widget.pet.shopId))),
+          child: const Text('Message the shop'),
         ),
         OutlinedButton(
           // The gifted pet is no longer for sale, so leave its page.

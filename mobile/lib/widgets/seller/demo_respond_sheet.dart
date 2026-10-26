@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import '../../models/service_models.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
+import '../../utils/video_room.dart';
 import '../ui_kit.dart';
 import 'seller_common.dart';
+import 'video_link_field.dart';
 
 class _Decision {
   final String value;
@@ -83,7 +85,9 @@ class _DemoRespondFormState extends State<_DemoRespondForm> {
     _decision = _decisions.first.value;
     _date = toDateParam(_demo.confirmedDate ?? _demo.preferredDate);
     _time = toTimeValue(_demo.confirmedTime ?? _demo.preferredTime);
-    _link = TextEditingController(text: _demo.meetLink ?? '');
+    // A video demo starts with its free PETSTA room; the owner may replace it.
+    final savedLink = (_demo.meetLink ?? '').trim();
+    _link = TextEditingController(text: savedLink.isNotEmpty ? savedLink : (_isVideo ? jitsiRoomUrl(_demo.id) : ''));
     _note = TextEditingController(text: _demo.sellerNote ?? '');
   }
 
@@ -162,10 +166,10 @@ class _DemoRespondFormState extends State<_DemoRespondForm> {
       }
       if (_time.isEmpty) timeError = 'Pick the time.';
 
+      // Empty is fine: a video demo then uses the free PETSTA room. A typed
+      // link has to be usable.
       final link = _link.text.trim();
-      if (_isVideo && link.isEmpty) {
-        linkError = 'Add the video link for this demo.';
-      } else if (link.isNotEmpty && !isHttpsUrl(link)) {
+      if (link.isNotEmpty && !isHttpsUrl(link)) {
         linkError = 'The link must start with https://';
       }
     }
@@ -194,7 +198,8 @@ class _DemoRespondFormState extends State<_DemoRespondForm> {
     final slot = <String, dynamic>{
       'confirmed_date': _date,
       'confirmed_time': _time,
-      'meet_link': link.isEmpty ? null : link,
+      // Video demos always carry a link: the typed one, else the PETSTA room.
+      'meet_link': link.isNotEmpty ? link : (_isVideo ? jitsiRoomUrl(_demo.id) : null),
       'seller_note': note.isEmpty ? null : note,
     };
     final Map<String, dynamic> patch;
@@ -301,22 +306,33 @@ class _DemoRespondFormState extends State<_DemoRespondForm> {
               ],
             ),
             const SizedBox(height: 16),
-            TextField(
-              controller: _link,
-              enabled: enabled,
-              keyboardType: TextInputType.url,
-              autocorrect: false,
-              decoration: InputDecoration(
-                labelText: _isVideo ? 'Video link' : 'Meeting link (optional)',
-                hintText: 'https://meet.google.com/...',
-                helperText: _isVideo
-                    ? 'Paste a Google Meet/Zoom link; the customer sees it on their Services & Health pages.'
-                    : 'Only needed if you want to share an online link as well.',
-                helperMaxLines: 3,
+            if (_isVideo)
+              VideoLinkField(
+                controller: _link,
+                roomId: demo.id,
+                enabled: enabled,
                 errorText: _linkError,
-                errorMaxLines: 2,
+                onChanged: () => setState(() => _linkError = null),
+              )
+            else
+              TextField(
+                controller: _link,
+                enabled: enabled,
+                keyboardType: TextInputType.url,
+                autocorrect: false,
+                enableSuggestions: false,
+                onChanged: (_) {
+                  if (_linkError != null) setState(() => _linkError = null);
+                },
+                decoration: InputDecoration(
+                  labelText: 'Meeting link (optional)',
+                  hintText: 'https://meet.google.com/...',
+                  helperText: 'Only needed if you want to share an online link as well.',
+                  helperMaxLines: 3,
+                  errorText: _linkError,
+                  errorMaxLines: 2,
+                ),
               ),
-            ),
           ],
           const SizedBox(height: 16),
           TextField(
@@ -349,7 +365,9 @@ class _DemoRespondFormState extends State<_DemoRespondForm> {
               const SizedBox(width: 12),
               Expanded(
                 child: ElevatedButton(
-                  onPressed: enabled ? _submit : null,
+                  // While saving the button keeps its colours (so the spinner
+                  // stays visible) and simply ignores taps.
+                  onPressed: enabled ? _submit : () {},
                   style: reject ? ElevatedButton.styleFrom(backgroundColor: AppColors.error) : null,
                   child: _submitting
                       ? const SizedBox(

@@ -20,13 +20,15 @@ class Profile {
     required this.createdAt,
   });
 
+  /// Tolerant on purpose: embeds such as `profiles(name)` or
+  /// `profiles(name,email)` return partial objects without id/role/created_at.
   factory Profile.fromJson(Map<String, dynamic> json) => Profile(
-        id: json['id'] as String,
-        role: json['role'] as String,
+        id: json['id'] as String? ?? '',
+        role: json['role'] as String? ?? '',
         name: json['name'] as String? ?? '',
         phone: json['phone'] as String?,
         email: json['email'] as String?,
-        createdAt: DateTime.parse(json['created_at'] as String),
+        createdAt: DateTime.tryParse(json['created_at'] as String? ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0),
       );
 }
 

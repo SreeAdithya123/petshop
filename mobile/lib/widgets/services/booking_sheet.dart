@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/app_error.dart';
+import '../../core/async_utils.dart';
 import '../../models/service_models.dart';
 import '../../services/supabase_service.dart';
 import '../../state/auth_provider.dart';
@@ -73,30 +75,46 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
   }
 
   Future<void> _pickDate() async {
-    final minDate = tomorrowDate();
-    final current = _date;
-    final initial = current != null && !current.isBefore(minDate) ? current : minDate;
+    // Recomputed on every open, so a sheet left open past midnight still
+    // offers only days that are still in the future.
+    final first = tomorrowDate();
+    final last = addDays(first, bookingAdvanceDays);
     final picked = await showDatePicker(
       context: context,
-      initialDate: initial,
-      firstDate: minDate,
-      lastDate: minDate.add(const Duration(days: 365)),
+      initialDate: clampDate(_date ?? first, first, last),
+      firstDate: first,
+      lastDate: last,
+      helpText: 'Select a date',
     );
     if (picked == null || !mounted) return;
     setState(() {
       _date = picked;
       _dateError = null;
+      _formError = null;
     });
   }
 
   Future<void> _submit(String userId) async {
+    if (_submitting) return;
     final minDate = tomorrowDate();
+    final maxDate = addDays(minDate, bookingAdvanceDays);
     final date = _date;
     final time = _time;
-    final dateError = date == null
-        ? 'Pick a date.'
-        : (date.isBefore(minDate) ? 'Pick a date from tomorrow onwards.' : null);
-    final timeError = time == null ? 'Pick a time slot.' : null;
+
+    String? dateError;
+    if (date == null) {
+      dateError = 'Pick a date.';
+    } else if (date.isBefore(minDate)) {
+      dateError = 'Pick a date from tomorrow onwards.';
+    } else if (date.isAfter(maxDate)) {
+      dateError = 'Slots can be booked up to $bookingAdvanceDays days ahead.';
+    }
+    String? timeError;
+    if (time == null) {
+      timeError = 'Pick a time slot.';
+    } else if (date != null && dateError == null && isPastSlot(date, time)) {
+      timeError = 'That time has already passed. Pick a later slot.';
+    }
     setState(() {
       _formError = null;
       _dateError = dateError;
@@ -116,17 +134,20 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
     setState(() => _submitting = true);
     String? failure;
     try {
-      await SupabaseService.client.from('service_bookings').insert({
-        'service_id': widget.service.id,
-        'customer_id': userId,
-        'booking_date': toDateParam(date),
-        'booking_time': time,
-        'delivery_mode': _mode,
-        'notes': notes,
-      });
+      await withTimeout(
+        SupabaseService.client.from('service_bookings').insert({
+          'service_id': widget.service.id,
+          'customer_id': userId,
+          'booking_date': toDateParam(date),
+          'booking_time': time,
+          'delivery_mode': _mode,
+          'notes': notes,
+        }),
+      );
     } catch (error) {
-      final message = errorText(error);
-      failure = message.isEmpty ? "Couldn't book that slot. Try again." : message;
+      failure = isTimeoutError(error)
+          ? "$kTimeoutError Check My bookings first, in case your slot was saved."
+          : errorText(error);
     }
 
     if (failure == null) widget.onBooked?.call();
@@ -141,6 +162,7 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
         _confirmation = '${widget.service.name} on ${formatDate(date)} at ${formatClock(time)} '
             '(${mode.label.toLowerCase()}). ${mode.hint}';
       } else {
+        // Everything typed so far stays in place so the person can just retry.
         _formError = failureText;
       }
     });
@@ -150,6 +172,15 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
   Widget build(BuildContext context) {
     final access = ServiceAccess.from(ref.watch(authControllerProvider));
 
+    // Closing the sheet mid-request would hide the outcome and invite a second
+    // booking, so back / drag / the close button wait until it has finished.
+    return PopScope(
+      canPop: !_submitting,
+      child: _buildBody(access),
+    );
+  }
+
+  Widget _buildBody(ServiceAccess access) {
     if (_booked) return _buildSuccess();
     final userId = access.userId;
     if (!access.canBook || userId == null) {
@@ -163,17 +194,34 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
 
   Widget _buildSuccess() {
     final provider = widget.consult ? 'clinic' : 'shop';
-    return SuccessPanel(
-      title: 'Booked — the $provider will confirm',
-      message: _confirmation,
-      actions: [
-        ElevatedButton(
-          onPressed: () => Navigator.of(context).pop(true),
-          child: Text(widget.consult ? 'View my consultations' : 'View my bookings'),
+    final video = _mode == 'video';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SuccessPanel(
+          title: 'Booked — the $provider will confirm',
+          message: _confirmation,
+          actions: [
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(widget.consult ? 'View my consultations' : 'View my bookings'),
+            ),
+            OutlinedButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Done'),
+            ),
+          ],
         ),
-        OutlinedButton(
-          onPressed: () => Navigator.of(context).pop(false),
-          child: const Text('Done'),
+        const SizedBox(height: 16),
+        NextStepsList(
+          steps: [
+            'The $provider reviews your request and confirms the slot. You can cancel any time before then.',
+            if (video)
+              'Once confirmed, a Join video consult button appears on your booking.'
+            else
+              'Once confirmed, your booking shows as confirmed. Arrive a few minutes early.',
+            if (video) 'Join a few minutes early. The clinic may need to let you in, and the call opens in your browser.',
+          ],
         ),
       ],
     );
@@ -189,6 +237,7 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
       if (duration.isNotEmpty) duration,
       formatPrice(service.price),
     ].join(' · ');
+    final date = _date;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -216,17 +265,23 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
         ],
         const SizedBox(height: 16),
         const SheetFieldLabel('Date'),
-        InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: _pickDate,
-          child: InputDecorator(
-            decoration: InputDecoration(
-              errorText: _dateError,
-              suffixIcon: const Icon(Icons.calendar_today_outlined, size: 20),
-            ),
-            child: Text(
-              _date == null ? 'Select a date' : formatDate(_date!),
-              style: AppTheme.body(color: _date == null ? AppColors.inkSoft : AppColors.ink),
+        Semantics(
+          button: true,
+          label: date == null ? 'Date, not selected' : 'Date, ${formatDate(date)}',
+          excludeSemantics: true,
+          onTap: _submitting ? null : _pickDate,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: _submitting ? null : _pickDate,
+            child: InputDecorator(
+              decoration: InputDecoration(
+                errorText: _dateError,
+                suffixIcon: const Icon(Icons.calendar_today_outlined, size: 20),
+              ),
+              child: Text(
+                date == null ? 'Select a date' : formatDate(date),
+                style: AppTheme.body(color: date == null ? AppColors.inkSoft : AppColors.ink),
+              ),
             ),
           ),
         ),
@@ -241,10 +296,13 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
           items: [
             for (final slot in bookingTimeSlots) DropdownMenuItem<String>(value: slot, child: Text(formatClock(slot))),
           ],
-          onChanged: (value) => setState(() {
-            _time = value;
-            _timeError = null;
-          }),
+          onChanged: _submitting
+              ? null
+              : (value) => setState(() {
+                    _time = value;
+                    _timeError = null;
+                    _formError = null;
+                  }),
         ),
         const SizedBox(height: 16),
         _buildModePicker(modes),
@@ -252,17 +310,22 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
         if (widget.consult) ..._buildConsultFields() else ..._buildNotesField(),
         if (_formError != null) ...[
           const SizedBox(height: 12),
-          Text(_formError!, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
+          Semantics(
+            liveRegion: true,
+            child: Text(_formError!, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
+          ),
         ],
         const SizedBox(height: 20),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
+        Wrap(
+          alignment: WrapAlignment.end,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 8,
+          runSpacing: 8,
           children: [
             TextButton(
               onPressed: _submitting ? null : () => Navigator.of(context).pop(),
               child: const Text('Cancel'),
             ),
-            const SizedBox(width: 8),
             LoadingButton(
               label: 'Book this slot',
               loading: _submitting,
@@ -290,7 +353,7 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
                 child: _ModeTile(
                   info: deliveryModeFor(modes[i]),
                   selected: _mode == modes[i],
-                  onTap: () => setState(() => _mode = modes[i]),
+                  onTap: _submitting ? null : () => setState(() => _mode = modes[i]),
                 ),
               ),
             ],
@@ -298,6 +361,10 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
         ),
         const SizedBox(height: 8),
         Text(deliveryModeFor(_mode).hint, style: AppTheme.body(fontSize: 12.5, color: AppColors.inkSoft)),
+        if (_mode == 'video') ...[
+          const SizedBox(height: 6),
+          Text(videoExpectationText, style: AppTheme.body(fontSize: 12.5, color: AppColors.inkSoft)),
+        ],
       ],
     );
   }
@@ -308,6 +375,7 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
       TextField(
         controller: _petNameController,
         maxLength: 60,
+        enabled: !_submitting,
         textCapitalization: TextCapitalization.words,
         decoration: const InputDecoration(counterText: ''),
       ),
@@ -320,7 +388,7 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
           const DropdownMenuItem<String?>(value: null, child: Text('Select')),
           for (final species in petSpeciesOptions) DropdownMenuItem<String?>(value: species, child: Text(species)),
         ],
-        onChanged: (value) => setState(() => _petSpecies = value),
+        onChanged: _submitting ? null : (value) => setState(() => _petSpecies = value),
       ),
       const SizedBox(height: 16),
       const SheetFieldLabel("What's the concern?", optional: true),
@@ -329,6 +397,7 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
         maxLength: 500,
         minLines: 3,
         maxLines: 5,
+        enabled: !_submitting,
         textCapitalization: TextCapitalization.sentences,
         decoration: const InputDecoration(
           hintText: "Symptoms, how long they've lasted, anything the vet should know.",
@@ -346,6 +415,7 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
         maxLength: 500,
         minLines: 3,
         maxLines: 5,
+        enabled: !_submitting,
         textCapitalization: TextCapitalization.sentences,
         decoration: const InputDecoration(
           hintText: "Anything the shop should know — your pet's name, temperament, preferences.",
@@ -359,7 +429,7 @@ class _ServiceBookingFormState extends ConsumerState<ServiceBookingForm> {
 class _ModeTile extends StatelessWidget {
   final DeliveryModeInfo info;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   const _ModeTile({required this.info, required this.selected, required this.onTap});
 
@@ -371,10 +441,12 @@ class _ModeTile extends StatelessWidget {
       selected: selected,
       label: info.label,
       excludeSemantics: true,
+      onTap: onTap,
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
         onTap: onTap,
         child: Container(
+          constraints: const BoxConstraints(minHeight: 64),
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 12),
           decoration: BoxDecoration(
             color: selected ? AppColors.primary.withValues(alpha: 0.06) : AppColors.surface,
@@ -383,13 +455,14 @@ class _ModeTile extends StatelessWidget {
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(info.icon, size: 20, color: color),
               const SizedBox(height: 4),
               Text(
                 info.label,
                 textAlign: TextAlign.center,
-                maxLines: 1,
+                maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: AppTheme.body(
                   fontSize: 12.5,

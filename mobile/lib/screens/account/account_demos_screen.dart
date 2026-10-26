@@ -7,6 +7,7 @@ import '../../services/supabase_service.dart';
 import '../../state/catalog_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
+import '../../utils/video_room.dart';
 import '../../widgets/account/account_widgets.dart';
 import '../../widgets/account_scaffold.dart';
 import '../../widgets/shared_widgets.dart';
@@ -58,7 +59,7 @@ class _DemosBody extends ConsumerStatefulWidget {
   ConsumerState<_DemosBody> createState() => _DemosBodyState();
 }
 
-class _DemosBodyState extends ConsumerState<_DemosBody> {
+class _DemosBodyState extends ConsumerState<_DemosBody> with AccountRefreshMixin<_DemosBody> {
   List<DemoRequest>? _demos;
   String? _loadError;
   _DemoFilter _filter = _DemoFilter.all;
@@ -71,6 +72,9 @@ class _DemosBodyState extends ConsumerState<_DemosBody> {
     super.initState();
     _load();
   }
+
+  @override
+  Future<void> refreshAccountData() => _load();
 
   void _retryLoad() {
     setState(() {
@@ -105,6 +109,7 @@ class _DemosBodyState extends ConsumerState<_DemosBody> {
   }
 
   Future<void> _cancel(DemoRequest demo) async {
+    if (_cancellingId != null) return;
     final petName = _petName(demo, fallback: 'this pet');
     final confirmed = await confirmAction(
       context,
@@ -134,7 +139,7 @@ class _DemosBodyState extends ConsumerState<_DemosBody> {
         setState(() {
           _cancellingId = null;
           _cancelErrorId = demo.id;
-          _cancelError = "This request can't be cancelled any more. The shop may have just updated it.";
+          _cancelError = changeBlockedMessage;
         });
       } else {
         setState(() => _cancellingId = null);
@@ -381,8 +386,11 @@ class _DemoCard extends StatelessWidget {
         .where((part) => part != null && part.isNotEmpty)
         .map((part) => part!)
         .join(' · ');
-    final meetUri = safeExternalUri(demo.meetLink);
     final isActive = _isActive(demo);
+    // The video link is only for approved video demos, and only when it is a
+    // plain web link.
+    final meetLink = (demo.meetLink ?? '').trim();
+    final canJoin = demo.status == 'approved' && demo.mode == 'video' && isSafeWebLink(meetLink);
 
     final asked = [
       formatDate(demo.preferredDate),
@@ -421,7 +429,8 @@ class _DemoCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 16),
-          _Stepper(status: demo.status),
+          // The status badge above says the same thing in words.
+          ExcludeSemantics(child: _Stepper(status: demo.status)),
           const SizedBox(height: 14),
           InfoRow('You asked for', asked),
           InfoRow('Format', _modeLabels[demo.mode] ?? titleCase(demo.mode)),
@@ -451,9 +460,9 @@ class _DemoCard extends StatelessWidget {
           ],
           if (demo.status == 'approved' && demo.mode == 'video') ...[
             const SizedBox(height: 14),
-            if (meetUri != null)
+            if (canJoin)
               ElevatedButton.icon(
-                onPressed: () => openExternalUri(context, meetUri),
+                onPressed: () => openExternalUri(context, Uri.parse(meetLink)),
                 icon: const Icon(Icons.videocam_outlined, size: 18),
                 label: const Text('Join video demo'),
               )
@@ -475,26 +484,30 @@ class _DemoCard extends StatelessWidget {
             Text(error, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
           ],
           const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Requested ${formatOrderDate(demo.createdAt)}',
-                  style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft),
-                ),
-              ),
-              if (petAvailable)
-                TextButton(
-                  onPressed: () => context.push('/pets/${demo.petId}'),
-                  child: const Text('View pet'),
-                ),
-              if (isActive)
-                OutlinedButton(
-                  onPressed: cancelling ? null : onCancel,
-                  child: Text(cancelling ? 'Cancelling…' : 'Cancel request'),
-                ),
-            ],
+          Text(
+            'Requested ${formatOrderDate(demo.createdAt)}',
+            style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft),
           ),
+          if (petAvailable || isActive) ...[
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                if (petAvailable)
+                  TextButton(
+                    onPressed: () => context.push('/pets/${demo.petId}'),
+                    child: const Text('View pet'),
+                  ),
+                if (isActive)
+                  OutlinedButton(
+                    onPressed: cancelling ? null : onCancel,
+                    child: Text(cancelling ? 'Cancelling…' : 'Cancel request'),
+                  ),
+              ],
+            ),
+          ],
         ],
       ),
     );

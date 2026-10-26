@@ -6,6 +6,7 @@ import '../data/service_categories.dart';
 import '../models/service_models.dart';
 import '../state/auth_provider.dart';
 import '../theme/app_theme.dart';
+import '../widgets/content_width.dart';
 import '../widgets/role_shell.dart';
 import '../widgets/services/booking_sheet.dart';
 import '../widgets/services/custom_service_sheet.dart';
@@ -13,6 +14,7 @@ import '../widgets/services/my_services_section.dart';
 import '../widgets/services/service_card.dart';
 import '../widgets/services/service_support.dart';
 import '../widgets/shared_widgets.dart';
+import '../widgets/skeletons.dart';
 import '../widgets/ui_kit.dart';
 
 class _ServiceGroup {
@@ -46,6 +48,10 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
   String _query = '';
   bool _fragmentHandled = false;
 
+  // A request to show "My bookings & requests" made before that section exists
+  // (the account is still loading) waits here and is retried after each build.
+  MyServicesTab? _pendingMine;
+
   @override
   void initState() {
     super.initState();
@@ -63,10 +69,7 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
         if (mounted) _openCustom();
       });
     } else if (fragment == 'my-bookings' || fragment == 'my-requests') {
-      final tab = fragment == 'my-requests' ? MyServicesTab.requests : MyServicesTab.bookings;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _showMine(tab);
-      });
+      _showMine(fragment == 'my-requests' ? MyServicesTab.requests : MyServicesTab.bookings);
     }
   }
 
@@ -84,20 +87,19 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
     super.dispose();
   }
 
-  /// [silent] keeps the current list on screen (pull-to-refresh).
-  Future<void> _load({bool silent = false}) async {
-    if (!silent || _services.isEmpty) {
-      setState(() {
-        _loading = true;
-        _error = null;
-      });
-    }
+  /// Loads the approved services. The current list stays on screen while it
+  /// reloads, so a failed refresh shows a notice above the stale rows instead
+  /// of blanking them.
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     try {
       final services = await fetchApprovedServices();
       if (!mounted) return;
       setState(() {
         _services = services;
-        _error = null;
         _loading = false;
       });
     } catch (error) {
@@ -111,7 +113,7 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
 
   Future<void> _refresh() async {
     final mine = _mineKey.currentState?.reloadAll();
-    await _load(silent: true);
+    await _load();
     if (mine != null) await mine;
   }
 
@@ -167,12 +169,27 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
     if (viewMine == true && mounted) _showMine(MyServicesTab.requests);
   }
 
+  /// Switches "My bookings & requests" to [tab] and scrolls it into view.
   void _showMine(MyServicesTab tab) {
+    _pendingMine = tab;
+    _schedulePendingMine();
+  }
+
+  void _schedulePendingMine() {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _flushPendingMine());
+  }
+
+  void _flushPendingMine() {
+    final tab = _pendingMine;
+    if (tab == null || !mounted) return;
+    final anchor = _mineAnchor.currentContext;
+    if (anchor == null) return; // not built yet; retried after the next build
+    _pendingMine = null;
     _mineKey.currentState?.showTab(tab);
+    // One more frame: the tab switch changes the section's height.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final anchor = _mineAnchor.currentContext;
-      if (!mounted || anchor == null) return;
-      Scrollable.ensureVisible(anchor, duration: const Duration(milliseconds: 350), curve: Curves.easeOut);
+      final target = _mineAnchor.currentContext;
+      if (mounted && target != null) scrollIntoView(target);
     });
   }
 
@@ -180,6 +197,15 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
   Widget build(BuildContext context) {
     final access = ServiceAccess.from(ref.watch(authControllerProvider));
     final filtered = _filtered();
+
+    if (_pendingMine != null) {
+      // Sellers and admins have no such section; stop waiting for it.
+      if (!access.loading && access.signedIn && !access.canBook) {
+        _pendingMine = null;
+      } else {
+        _schedulePendingMine();
+      }
+    }
 
     return RoleShell(
       title: 'Services',
@@ -189,26 +215,30 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
           physics: const AlwaysScrollableScrollPhysics(),
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           padding: kScreenPadding,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildHero(),
-              const SizedBox(height: 16),
-              _buildFilters(),
-              const SizedBox(height: 16),
-              _buildServices(filtered),
-              const SizedBox(height: 28),
-              _buildCustomBanner(),
-              const SizedBox(height: 28),
-              _buildMine(access),
-            ],
+          child: ContentWidth(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildHero(access),
+                const SizedBox(height: 16),
+                _buildFilters(),
+                const SizedBox(height: 16),
+                _buildServices(filtered),
+                const SizedBox(height: 28),
+                _buildCustomBanner(),
+                const SizedBox(height: 28),
+                _buildMine(access),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildHero() {
+  Widget _buildHero(ServiceAccess access) {
+    // Sellers and admins don't book services, so no shortcut to the lists.
+    final showMineLink = access.loading || !access.signedIn || access.canBook;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(20),
@@ -227,25 +257,33 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Pet services', style: AppTheme.display(fontSize: 28)),
+          Semantics(
+            header: true,
+            child: Text('Pet services', style: AppTheme.display(fontSize: 28)),
+          ),
           const SizedBox(height: 6),
           Text(
             'Vets, grooming, training and more from approved local shops. Pick a slot and the shop confirms it.',
             style: AppTheme.body(color: AppColors.inkSoft),
           ),
           const SizedBox(height: 8),
-          TextButton.icon(
-            onPressed: () => context.push('/health#vet'),
-            icon: const Icon(Icons.medical_services_outlined, size: 18),
-            label: const Text('Need a vet? Book a video consult'),
-            style: TextButton.styleFrom(
-              foregroundColor: AppColors.primary,
-              padding: const EdgeInsets.symmetric(vertical: 6),
-              minimumSize: const Size(0, 36),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              alignment: Alignment.centerLeft,
-              textStyle: AppTheme.body(fontSize: 14, fontWeight: FontWeight.w600),
-            ),
+          Wrap(
+            spacing: 8,
+            children: [
+              TextButton.icon(
+                onPressed: () => context.push('/health#vet'),
+                icon: const Icon(Icons.medical_services_outlined, size: 18),
+                label: const Text('Need a vet? Book a video consult'),
+                style: _linkStyle,
+              ),
+              if (showMineLink)
+                TextButton.icon(
+                  onPressed: () => _showMine(MyServicesTab.bookings),
+                  icon: const Icon(Icons.event_note_outlined, size: 18),
+                  label: const Text('My bookings & requests'),
+                  style: _linkStyle,
+                ),
+            ],
           ),
           const SizedBox(height: 8),
           SizedBox(
@@ -266,23 +304,27 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        TextField(
-          controller: _searchController,
-          textInputAction: TextInputAction.search,
-          onChanged: (value) => setState(() => _query = value),
-          decoration: InputDecoration(
-            hintText: 'Search services',
-            prefixIcon: const Icon(Icons.search, size: 20),
-            suffixIcon: _query.isEmpty
-                ? null
-                : IconButton(
-                    tooltip: 'Clear search',
-                    icon: const Icon(Icons.close, size: 20),
-                    onPressed: () {
-                      _searchController.clear();
-                      setState(() => _query = '');
-                    },
-                  ),
+        Semantics(
+          textField: true,
+          label: 'Search services',
+          child: TextField(
+            controller: _searchController,
+            textInputAction: TextInputAction.search,
+            onChanged: (value) => setState(() => _query = value),
+            decoration: InputDecoration(
+              hintText: 'Search services',
+              prefixIcon: const Icon(Icons.search, size: 20),
+              suffixIcon: _query.isEmpty
+                  ? null
+                  : IconButton(
+                      tooltip: 'Clear search',
+                      icon: const Icon(Icons.close, size: 20),
+                      onPressed: () {
+                        _searchController.clear();
+                        setState(() => _query = '');
+                      },
+                    ),
+            ),
           ),
         ),
         const SizedBox(height: 12),
@@ -299,24 +341,29 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
   }
 
   Widget _buildServices(List<ServiceItem> filtered) {
-    if (_loading) {
-      return const LoadingView(label: 'Loading services…');
-    }
     final error = _error;
-    if (error != null) {
-      return InlineErrorNotice(message: "Couldn't load services: $error", onRetry: () => _load());
+    if (_loading && _services.isEmpty) {
+      return const ListSkeleton(count: 3, itemHeight: 150);
+    }
+    if (error != null && _services.isEmpty) {
+      return InlineErrorNotice(message: "Couldn't load services: $error", onRetry: _load);
     }
     if (_services.isEmpty) {
-      return const EmptyState(
-        title: 'No services listed yet',
-        description: 'Shops are still getting set up. Need something specific? Send a custom request below and shops will quote.',
+      return const CardBox(
+        child: EmptyState(
+          title: 'No services listed yet',
+          description:
+              'Shops are still getting set up. Need something specific? Send a custom request below and shops will quote.',
+        ),
       );
     }
     if (filtered.isEmpty) {
-      return EmptyState(
-        title: 'No services match',
-        description: 'Try a different category or search term.',
-        action: OutlinedButton(onPressed: _clearFilters, child: const Text('Clear filters')),
+      return CardBox(
+        child: EmptyState(
+          title: 'No services match',
+          description: 'Try a different category or search term.',
+          action: OutlinedButton(onPressed: _clearFilters, child: const Text('Clear filters')),
+        ),
       );
     }
 
@@ -324,6 +371,10 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (error != null) ...[
+          InlineErrorNotice(message: "Couldn't refresh services: $error", onRetry: _load),
+          const SizedBox(height: 12),
+        ],
         Text(
           '$count ${count == 1 ? 'service' : 'services'}',
           style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
@@ -366,7 +417,10 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text("Can't find what you need?", style: AppTheme.display(fontSize: 22, color: Colors.white)),
+          Semantics(
+            header: true,
+            child: Text("Can't find what you need?", style: AppTheme.display(fontSize: 22, color: Colors.white)),
+          ),
           const SizedBox(height: 8),
           Text(
             "Describe the service you're after — a special grooming style, a home visit, anything — and nearby "
@@ -400,7 +454,10 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
       key: _mineAnchor,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('My bookings & requests', style: AppTheme.display(fontSize: 22)),
+        Semantics(
+          header: true,
+          child: Text('My bookings & requests', style: AppTheme.display(fontSize: 22)),
+        ),
         const SizedBox(height: 4),
         Text(
           "Track the slots you've booked and the quotes on your custom requests.",
@@ -420,6 +477,12 @@ class _ServicesScreenState extends ConsumerState<ServicesScreen> {
   }
 }
 
+final ButtonStyle _linkStyle = TextButton.styleFrom(
+  foregroundColor: AppColors.primary,
+  minimumSize: const Size(0, 48),
+  textStyle: AppTheme.body(fontSize: 14, fontWeight: FontWeight.w600),
+);
+
 class _CategoryHeading extends StatelessWidget {
   final ServiceCategory category;
   final int count;
@@ -427,14 +490,26 @@ class _CategoryHeading extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(category.icon, size: 22, color: AppColors.primary),
-        const SizedBox(width: 8),
-        Text(category.label, style: AppTheme.display(fontSize: 18, fontWeight: FontWeight.w600)),
-        const SizedBox(width: 6),
-        Text('($count)', style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
-      ],
+    return Semantics(
+      header: true,
+      label: '${category.label}, $count',
+      excludeSemantics: true,
+      child: Row(
+        children: [
+          Icon(category.icon, size: 22, color: AppColors.primary),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              category.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTheme.display(fontSize: 18, fontWeight: FontWeight.w600),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text('($count)', style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
+        ],
+      ),
     );
   }
 }

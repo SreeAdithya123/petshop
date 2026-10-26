@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 
 import '../../data/service_categories.dart';
 import '../../models/service_models.dart';
-import '../../services/supabase_service.dart';
 import '../ui_kit.dart';
 import 'seller_common.dart';
 
@@ -124,17 +123,10 @@ class _ServiceFormState extends State<_ServiceForm> {
       'duration_minutes': durationText.isEmpty ? null : int.parse(durationText),
     };
 
-    String? failure;
-    try {
-      final existing = widget.service;
-      if (existing != null) {
-        failure = await updateRow('services', existing.id, fields);
-      } else {
-        await SupabaseService.client.from('services').insert({'shop_id': widget.shopId, ...fields});
-      }
-    } catch (e) {
-      failure = errorText(e);
-    }
+    final existing = widget.service;
+    final failure = existing != null
+        ? await updateRow('services', existing.id, fields)
+        : await insertRow('services', {'shop_id': widget.shopId, ...fields});
 
     if (failure != null) {
       if (!mounted) return;

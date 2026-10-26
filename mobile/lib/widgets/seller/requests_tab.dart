@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../models/service_models.dart';
@@ -33,6 +35,7 @@ class RequestsTab extends StatefulWidget {
 
 class _RequestsTabState extends State<RequestsTab> {
   String? _filter;
+  int _limit = kPageSize;
 
   void _openQuote(CustomServiceRequest request) {
     showQuoteSheet(context, request: request, shopId: widget.shopId, onSent: _handleSent);
@@ -53,6 +56,7 @@ class _RequestsTabState extends State<RequestsTab> {
         final openCount = requests.where((request) => request.status == 'open').length;
         final active = _filter ?? (openCount > 0 ? 'open' : 'all');
         final visible = applyStatusFilter(_requestFilters, active, requests, _statusOf);
+        final shown = math.min(_limit, visible.length);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -65,7 +69,10 @@ class _RequestsTabState extends State<RequestsTab> {
             FilterChipBar<String>(
               options: filterOptions(_requestFilters, requests, _statusOf),
               selected: active,
-              onSelected: (value) => setState(() => _filter = value),
+              onSelected: (value) => setState(() {
+                _filter = value;
+                _limit = kPageSize;
+              }),
             ),
             const SizedBox(height: 16),
             if (visible.isEmpty)
@@ -77,8 +84,8 @@ class _RequestsTabState extends State<RequestsTab> {
                       : 'No requests match this filter.',
                 ),
               )
-            else
-              for (final request in visible)
+            else ...[
+              for (final request in visible.take(shown))
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
                   child: RequestCard(
@@ -90,6 +97,12 @@ class _RequestsTabState extends State<RequestsTab> {
                     onChanged: widget.query.reload,
                   ),
                 ),
+              LoadMoreButton(
+                shown: shown,
+                total: visible.length,
+                onPressed: () => setState(() => _limit += kPageSize),
+              ),
+            ],
           ],
         );
       },

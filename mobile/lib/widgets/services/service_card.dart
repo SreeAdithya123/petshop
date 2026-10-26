@@ -30,7 +30,8 @@ class CatalogServiceCard extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              ServiceTile(photoUrl: photo, icon: category.icon),
+              // Decorative: the name next to it already says what the service is.
+              ExcludeSemantics(child: ServiceTile(photoUrl: photo, icon: category.icon)),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -40,7 +41,14 @@ class CatalogServiceCard extends StatelessWidget {
                       children: [
                         Icon(category.icon, size: 14, color: AppColors.inkSoft),
                         const SizedBox(width: 4),
-                        Text(category.label, style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
+                        Flexible(
+                          child: Text(
+                            category.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft),
+                          ),
+                        ),
                       ],
                     ),
                     const SizedBox(height: 2),
@@ -67,30 +75,39 @@ class CatalogServiceCard extends StatelessWidget {
             ),
           ],
           const SizedBox(height: 14),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
+          // Wrap (not Row) so the price and button stack at 320dp / large text.
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.end,
+            spacing: 12,
+            runSpacing: 10,
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      formatPrice(service.price),
-                      style: AppTheme.display(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.accent),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    formatPrice(service.price),
+                    style: AppTheme.display(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.accent),
+                  ),
+                  if (duration.isNotEmpty)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.schedule, size: 14, color: AppColors.inkSoft),
+                        const SizedBox(width: 4),
+                        Text(duration, style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
+                      ],
                     ),
-                    if (duration.isNotEmpty)
-                      Row(
-                        children: [
-                          const Icon(Icons.schedule, size: 14, color: AppColors.inkSoft),
-                          const SizedBox(width: 4),
-                          Text(duration, style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
-                        ],
-                      ),
-                  ],
-                ),
+                ],
               ),
-              const SizedBox(width: 12),
-              ElevatedButton(onPressed: onBook, child: const Text('Book now')),
+              Semantics(
+                button: true,
+                label: 'Book ${service.name}',
+                excludeSemantics: true,
+                onTap: onBook,
+                child: ElevatedButton(onPressed: onBook, child: const Text('Book now')),
+              ),
             ],
           ),
         ],

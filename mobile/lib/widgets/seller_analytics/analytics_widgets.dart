@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
+import '../seller/seller_common.dart';
 import '../ui_kit.dart';
 
 // Presentation pieces for the seller analytics screen (StatCard, Card,
@@ -16,23 +17,25 @@ class AnalyticsStatTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return CardBox(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label, style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
-          const SizedBox(height: 4),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
-            child: Text(value, style: AppTheme.display(fontSize: 22, fontWeight: FontWeight.w700)),
-          ),
-          if (hint != null) ...[
+    return MergeSemantics(
+      child: CardBox(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
             const SizedBox(height: 4),
-            Text(hint!, style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(value, style: AppTheme.display(fontSize: 22, fontWeight: FontWeight.w700)),
+            ),
+            if (hint != null) ...[
+              const SizedBox(height: 4),
+              Text(hint!, style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -141,39 +144,44 @@ class _BarRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.baseline,
-          textBaseline: TextBaseline.alphabetic,
-          children: [
-            Expanded(child: Text(label, style: AppTheme.body(fontSize: 14))),
-            const SizedBox(width: 12),
-            Text(figure, style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
-          ],
-        ),
-        const SizedBox(height: 6),
-        Container(
-          height: 8,
-          decoration: BoxDecoration(
-            color: AppColors.ink.withValues(alpha: 0.05),
-            borderRadius: BorderRadius.circular(999),
+    // The bar is decorative: screen readers get "Label: figure" instead.
+    return Semantics(
+      container: true,
+      label: '$label: $figure',
+      excludeSemantics: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(child: Text(label, style: AppTheme.body(fontSize: 14))),
+              const SizedBox(width: 12),
+              Text(figure, style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
+            ],
           ),
-          child: FractionallySizedBox(
-            alignment: Alignment.centerLeft,
-            widthFactor: fraction,
-            child: DecoratedBox(
-              decoration: BoxDecoration(color: tone, borderRadius: BorderRadius.circular(999)),
+          const SizedBox(height: 6),
+          Container(
+            height: 8,
+            decoration: BoxDecoration(
+              color: AppColors.ink.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: FractionallySizedBox(
+              alignment: Alignment.centerLeft,
+              widthFactor: fraction,
+              child: DecoratedBox(
+                decoration: BoxDecoration(color: tone, borderRadius: BorderRadius.circular(999)),
+              ),
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
 
-/// Centered "couldn't load" note with a retry button.
+/// "Couldn't load analytics" card with a retry button.
 class AnalyticsErrorView extends StatelessWidget {
   final String message;
   final VoidCallback onRetry;
@@ -182,19 +190,6 @@ class AnalyticsErrorView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 32),
-      child: Column(
-        children: [
-          Text(
-            message,
-            style: AppTheme.body(color: AppColors.error),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 16),
-          OutlinedButton(onPressed: onRetry, child: const Text('Try again')),
-        ],
-      ),
-    );
+    return SellerLoadError(what: 'analytics', message: message, onRetry: onRetry);
   }
 }

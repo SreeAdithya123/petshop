@@ -48,6 +48,7 @@ class _RequestCardState extends State<RequestCard> {
   String? _error;
 
   Future<void> _markClosed() async {
+    if (_busy) return;
     setState(() {
       _busy = true;
       _error = null;
@@ -63,7 +64,7 @@ class _RequestCardState extends State<RequestCard> {
       _busy = false;
       _error = failure;
     });
-    if (failure == null) widget.onChanged();
+    if (failure == null || failure == kNothingChanged) widget.onChanged();
   }
 
   @override
@@ -187,7 +188,7 @@ class _RequestCardState extends State<RequestCard> {
         runSpacing: 8,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
-          ElevatedButton(onPressed: _busy ? null : _markClosed, child: Text(_busy ? 'Closing…' : 'Mark closed')),
+          LoadingButton(label: 'Mark closed', loading: _busy, onPressed: _markClosed),
           Text(
             'Close this once you have delivered the service.',
             style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),

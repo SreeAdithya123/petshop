@@ -1,20 +1,28 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../models/models.dart';
 import '../repositories/repositories.dart';
 import '../state/auth_provider.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
+import '../widgets/content_width.dart';
+import '../widgets/pet_actions/gift_pet_sheet.dart' show isEmailOrPhone;
 import '../widgets/pet_widgets.dart';
 import '../widgets/role_shell.dart';
 import '../widgets/shared_widgets.dart';
+import '../widgets/skeletons.dart';
 import '../widgets/ui_kit.dart';
+import 'store_screen.dart' show discardPendingOrder, stockColor, stockLabel;
 
 /// Mirrors src/pages/Gifting.jsx: a list of available products (public
 /// columns plus the shop's name only), each with an inline "Send as gift"
 /// form that places an order + order_item + gift row. The shop confirms
-/// pickup details afterwards; payment happens in person.
+/// pickup details afterwards; payment happens in person. (Pets are gifted from
+/// their own page.)
 class GiftingScreen extends ConsumerStatefulWidget {
   const GiftingScreen({super.key});
 
@@ -25,7 +33,7 @@ class GiftingScreen extends ConsumerStatefulWidget {
 class _GiftingScreenState extends ConsumerState<GiftingScreen> {
   List<Product> _products = [];
   bool _loading = true;
-  String? _error;
+  Object? _error;
   String? _activeProductId;
 
   @override
@@ -51,120 +59,146 @@ class _GiftingScreenState extends ConsumerState<GiftingScreen> {
         _error = null;
         _loading = false;
       });
-    } catch (e) {
+    } catch (error) {
       if (!mounted) return;
       setState(() {
-        _error = errorText(e);
+        _error = error;
         _loading = false;
       });
+    }
+  }
+
+  /// Pull-to-refresh: keeps the list on screen if the reload fails.
+  Future<void> _refresh() async {
+    final hadProducts = _products.isNotEmpty;
+    await _fetch();
+    final error = _error;
+    if (mounted && hadProducts && error != null) {
+      showSnack(context, commerceErrorText(error), error: true);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(authControllerProvider);
+    final authLoading = auth.status == AuthStatus.loading;
     final profile = auth.status == AuthStatus.signedIn ? auth.profile : null;
 
-    final header = <Widget>[
-      Text('Send a gift', style: AppTheme.display(fontSize: 28, fontWeight: FontWeight.w700)),
-      const SizedBox(height: 6),
-      Text(
-        'Pick something from the store and send it to someone else — the shop will confirm pickup details with you.',
-        style: AppTheme.body(color: AppColors.inkSoft),
-      ),
-      const SizedBox(height: 20),
-    ];
-
-    final Widget content;
+    final Widget state;
     if (_loading) {
-      content = ListView(
-        padding: kScreenPadding,
-        children: [
-          ...header,
-          const SkeletonPulse(
-            child: Column(
-              children: [
-                _GiftCardSkeleton(),
-                SizedBox(height: 12),
-                _GiftCardSkeleton(),
-                SizedBox(height: 12),
-                _GiftCardSkeleton(),
-              ],
-            ),
-          ),
-        ],
-      );
-    } else if (_error != null) {
-      content = RefreshIndicator(
-        onRefresh: _fetch,
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: kScreenPadding,
-          children: [
-            ...header,
-            EmptyState(
-              title: "We couldn't load gift ideas",
-              description: _error,
-              action: ElevatedButton(onPressed: _load, child: const Text('Try again')),
-            ),
-          ],
-        ),
+      state = const _GiftSkeleton();
+    } else if (_error != null && _products.isEmpty) {
+      state = CommerceRetryView(title: "We couldn't load gift ideas", error: _error, onRetry: _load);
+    } else if (_products.isEmpty) {
+      state = const EmptyState(
+        title: 'No products available to gift right now',
+        description: 'Shops have not listed any products yet. Check back soon.',
       );
     } else {
-      content = RefreshIndicator(
-        onRefresh: _fetch,
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: kScreenPadding,
-          children: [
-            ...header,
-            if (_products.isEmpty)
-              const EmptyState(title: 'No products available to gift right now')
-            else
-              for (final product in _products) ...[
-                _GiftProductCard(
-                  product: product,
-                  isActive: _activeProductId == product.id,
-                  profile: profile,
-                  onSendTap: () => setState(() => _activeProductId = product.id),
-                  onDone: () => setState(() => _activeProductId = null),
-                ),
-                const SizedBox(height: 12),
-              ],
+      state = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final product in _products) ...[
+            _GiftProductCard(
+              key: ValueKey(product.id),
+              product: product,
+              isActive: _activeProductId == product.id,
+              profile: profile,
+              authLoading: authLoading,
+              onSendTap: () => setState(() => _activeProductId = product.id),
+              onDone: () => setState(() => _activeProductId = null),
+            ),
+            const SizedBox(height: 12),
           ],
-        ),
+        ],
       );
     }
 
-    return RoleShell(title: 'Gifting', child: content);
+    return RoleShell(
+      title: 'Gifting',
+      actions: const [CartAppBarAction()],
+      child: RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          padding: kScreenPadding,
+          children: [
+            ContentWidth(
+              maxWidth: 720,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Semantics(
+                    header: true,
+                    child: Text('Send a gift', style: AppTheme.display(fontSize: 28, fontWeight: FontWeight.w700)),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Pick something from the store and send it to someone else. The shop will confirm pickup details '
+                    'with you, and you pay in person.',
+                    style: AppTheme.body(color: AppColors.inkSoft),
+                  ),
+                  const SizedBox(height: 14),
+                  const NoticeBox(
+                    message: 'Want to gift a pet? Open any pet and choose "Send as gift" on its page.',
+                  ),
+                  const SizedBox(height: 20),
+                  state,
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
-class _GiftCardSkeleton extends StatelessWidget {
-  const _GiftCardSkeleton();
+/// Placeholder cards shown while the products load.
+class _GiftSkeleton extends StatelessWidget {
+  const _GiftSkeleton();
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: const Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    return Semantics(
+      label: 'Loading gift ideas',
+      child: Column(
         children: [
-          SkeletonBox(width: 50, height: 12),
-          SizedBox(height: 8),
-          SkeletonBox(width: 160, height: 15),
-          SizedBox(height: 8),
-          SkeletonBox(width: 100, height: 13),
-          SizedBox(height: 10),
-          SkeletonBox(width: 70, height: 18),
-          SizedBox(height: 12),
-          SkeletonBox(height: 40, radius: 10),
+          for (var i = 0; i < 3; i++)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: const Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SkeletonBox(width: 72, height: 72, radius: 10),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SkeletonBox(width: 50, height: 12),
+                          SizedBox(height: 8),
+                          SkeletonBox(width: 160, height: 15),
+                          SizedBox(height: 8),
+                          SkeletonBox(width: 100, height: 13),
+                          SizedBox(height: 10),
+                          SkeletonBox(width: 70, height: 18),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -175,13 +209,16 @@ class _GiftProductCard extends StatelessWidget {
   final Product product;
   final bool isActive;
   final Profile? profile;
+  final bool authLoading;
   final VoidCallback onSendTap;
   final VoidCallback onDone;
 
   const _GiftProductCard({
+    super.key,
     required this.product,
     required this.isActive,
     required this.profile,
+    required this.authLoading,
     required this.onSendTap,
     required this.onDone,
   });
@@ -190,48 +227,93 @@ class _GiftProductCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final signedInProfile = profile;
     final shopName = product.shop?.name ?? '';
+    final outOfStock = product.stockQuantity <= 0;
+
+    final Widget action;
+    if (isActive && signedInProfile != null && signedInProfile.role == 'customer') {
+      action = _GiftForm(product: product, profile: signedInProfile, onDone: onDone);
+    } else if (isActive && signedInProfile != null) {
+      action = const NoticeBox(
+        message: 'Only customer accounts can send gifts. Log in with a customer account to continue.',
+      );
+    } else if (isActive && !authLoading) {
+      action = const LoginPromptCard(
+        compact: true,
+        title: 'Log in to send a gift',
+        description: 'Log in to send this as a gift.',
+      );
+    } else {
+      action = Semantics(
+        button: true,
+        enabled: !outOfStock,
+        label: outOfStock ? '${product.name} is out of stock' : 'Send ${product.name} as a gift',
+        excludeSemantics: true,
+        onTap: outOfStock ? null : onSendTap,
+        child: OutlinedButton.icon(
+          onPressed: outOfStock ? null : onSendTap,
+          style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+          icon: const Icon(Icons.card_giftcard, size: 18),
+          label: Text(outOfStock ? 'Out of stock' : 'Send as gift'),
+        ),
+      );
+    }
 
     return CardBox(
       padding: const EdgeInsets.all(14),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(titleCase(product.category), style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
-          const SizedBox(height: 4),
-          Text(product.name, style: AppTheme.body(fontWeight: FontWeight.w600)),
-          if (shopName.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              shopName,
-              style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-          const SizedBox(height: 6),
-          Text(
-            formatPrice(product.price),
-            style: AppTheme.display(fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.accent),
-          ),
-          if (isActive)
-            Padding(
-              padding: const EdgeInsets.only(top: 12),
-              child: signedInProfile != null
-                  ? _GiftForm(product: product, profile: signedInProfile, onDone: onDone)
-                  : const LoginPromptCard(
-                      compact: true,
-                      title: 'Log in to send a gift',
-                      description: 'Log in to send this as a gift.',
-                    ),
-            )
-          else
-            Padding(
-              padding: const EdgeInsets.only(top: 12),
-              child: SizedBox(
-                width: double.infinity,
-                child: OutlinedButton(onPressed: onSendTap, child: const Text('Send as gift')),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: SizedBox(
+                  width: 72,
+                  height: 72,
+                  child: ProductPhotoView(
+                    src: product.photoUrls.isEmpty ? null : product.photoUrls.first,
+                    category: product.category,
+                    cacheWidth: 144,
+                  ),
+                ),
               ),
-            ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(titleCase(product.category), style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
+                    const SizedBox(height: 2),
+                    Text(
+                      product.name,
+                      style: AppTheme.body(fontWeight: FontWeight.w600),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    if (shopName.isNotEmpty)
+                      Text(
+                        shopName,
+                        style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    const SizedBox(height: 4),
+                    Text(
+                      formatPrice(product.price),
+                      style: AppTheme.display(fontSize: 17, fontWeight: FontWeight.w700, color: kPetPriceColor),
+                    ),
+                    Text(
+                      stockLabel(product),
+                      style: AppTheme.body(fontSize: 12, color: stockColor(product)),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          action,
         ],
       ),
     );
@@ -262,8 +344,8 @@ class _GiftFormState extends State<_GiftForm> {
   String? _contactError;
   String? _formError;
   bool _submitting = false;
-  bool _sent = false;
-  String _sentRecipientName = '';
+  String? _sentRecipientName;
+  String? _sentOrderId;
 
   @override
   void dispose() {
@@ -274,18 +356,25 @@ class _GiftFormState extends State<_GiftForm> {
   }
 
   Future<void> _submit() async {
+    if (_submitting) return;
     final name = _nameController.text.trim();
     final contact = _contactController.text.trim();
+    final message = _messageController.text.trim();
+    final nameError = name.isEmpty ? "Enter the recipient's name." : null;
+    final contactError = contact.isEmpty
+        ? "Enter the recipient's email or phone number."
+        : (isEmailOrPhone(contact) ? null : 'Enter a valid email address or phone number.');
     setState(() {
-      _nameError = name.isEmpty ? "Enter the recipient's name." : null;
-      _contactError = contact.isEmpty ? 'Enter a phone number or email for the recipient.' : null;
+      _nameError = nameError;
+      _contactError = contactError;
       _formError = null;
     });
-    if (_nameError != null || _contactError != null) return;
+    if (nameError != null || contactError != null) return;
 
     setState(() => _submitting = true);
+    String? orderId;
     try {
-      final orderId = await OrdersRepository().insert({
+      orderId = await OrdersRepository().insert({
         'customer_id': widget.profile.id,
         'order_type': 'gift',
         'status': 'pending',
@@ -299,7 +388,6 @@ class _GiftFormState extends State<_GiftForm> {
         'quantity': 1,
         'price_at_purchase': widget.product.price,
       });
-      final message = _messageController.text.trim();
       await GiftsRepository().insert({
         'order_id': orderId,
         'sender_id': widget.profile.id,
@@ -308,87 +396,121 @@ class _GiftFormState extends State<_GiftForm> {
         'message': message.isEmpty ? null : message,
         'delivery_status': 'pending',
       });
+    } catch (error) {
+      // Don't leave a half-built gift order behind for the shop to puzzle over.
+      if (orderId != null) unawaited(discardPendingOrder(orderId));
       if (!mounted) return;
       setState(() {
-        _sent = true;
-        _sentRecipientName = name;
+        _formError = commerceErrorText(error);
         _submitting = false;
       });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _formError = errorText(e);
-        _submitting = false;
-      });
+      return;
     }
+    if (!mounted) return;
+    setState(() {
+      _sentRecipientName = name;
+      _sentOrderId = orderId;
+      _submitting = false;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_sent) {
-      return NoticeBox(
-        message: 'Gift order placed for $_sentRecipientName — the shop will confirm pickup details with you.',
-        color: AppColors.trust,
-        icon: Icons.check_circle_outline,
+    final recipient = _sentRecipientName;
+    if (recipient != null) {
+      return SuccessPanel(
+        title: 'Gift order placed',
+        message: 'Your gift for $recipient is reserved. The shop will confirm pickup details with you, and you pay '
+            'in person. Nothing was charged online.',
+        actions: [
+          ElevatedButton(
+            onPressed: () => context.go('/account/orders'),
+            child: const Text('View my orders'),
+          ),
+          OutlinedButton(
+            onPressed: () =>
+                context.push(shopSupportRoute(shopId: widget.product.shopId, orderId: _sentOrderId)),
+            child: const Text('Message the shop'),
+          ),
+          TextButton(onPressed: widget.onDone, child: const Text('Done')),
+        ],
       );
     }
 
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppColors.paper,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Recipient name', style: AppTheme.body(fontSize: 13)),
-          const SizedBox(height: 4),
-          TextField(
-            controller: _nameController,
-            enabled: !_submitting,
-            textCapitalization: TextCapitalization.words,
-            style: AppTheme.body(fontSize: 14),
-            decoration: InputDecoration(errorText: _nameError, isDense: true),
-          ),
-          const SizedBox(height: 10),
-          Text('Recipient phone or email', style: AppTheme.body(fontSize: 13)),
-          const SizedBox(height: 4),
-          TextField(
-            controller: _contactController,
-            enabled: !_submitting,
-            style: AppTheme.body(fontSize: 14),
-            decoration: InputDecoration(errorText: _contactError, isDense: true),
-          ),
-          const SizedBox(height: 10),
-          Text('Message (optional)', style: AppTheme.body(fontSize: 13)),
-          const SizedBox(height: 4),
-          TextField(
-            controller: _messageController,
-            enabled: !_submitting,
-            style: AppTheme.body(fontSize: 14),
-            minLines: 2,
-            maxLines: 4,
-            textCapitalization: TextCapitalization.sentences,
-            decoration: const InputDecoration(isDense: true),
-          ),
-          if (_formError != null) ...[
-            const SizedBox(height: 10),
-            NoticeBox.error(message: _formError!),
-          ],
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              LoadingButton(label: 'Send gift', loading: _submitting, onPressed: _submit),
-              const SizedBox(width: 8),
-              TextButton(
-                onPressed: _submitting ? null : widget.onDone,
-                child: const Text('Cancel'),
+    return PopScope(
+      canPop: !_submitting,
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: AppColors.paper,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _nameController,
+              enabled: !_submitting,
+              maxLength: 80,
+              textCapitalization: TextCapitalization.words,
+              textInputAction: TextInputAction.next,
+              style: AppTheme.body(fontSize: 14),
+              decoration: InputDecoration(labelText: 'Recipient name', errorText: _nameError, counterText: ''),
+              onChanged: (_) {
+                if (_nameError != null) setState(() => _nameError = null);
+              },
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _contactController,
+              enabled: !_submitting,
+              maxLength: 120,
+              keyboardType: TextInputType.emailAddress,
+              autocorrect: false,
+              enableSuggestions: false,
+              textInputAction: TextInputAction.next,
+              style: AppTheme.body(fontSize: 14),
+              decoration: InputDecoration(
+                labelText: 'Recipient phone or email',
+                errorText: _contactError,
+                counterText: '',
               ),
+              onChanged: (_) {
+                if (_contactError != null) setState(() => _contactError = null);
+              },
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _messageController,
+              enabled: !_submitting,
+              minLines: 2,
+              maxLines: 4,
+              maxLength: 300,
+              textCapitalization: TextCapitalization.sentences,
+              style: AppTheme.body(fontSize: 14),
+              decoration: const InputDecoration(labelText: 'Message (optional)'),
+            ),
+            if (_formError != null) ...[
+              const SizedBox(height: 8),
+              Semantics(liveRegion: true, child: NoticeBox.error(message: _formError!)),
             ],
-          ),
-        ],
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                LoadingButton(label: 'Send gift', loading: _submitting, onPressed: _submit),
+                TextButton(
+                  onPressed: _submitting ? null : widget.onDone,
+                  style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

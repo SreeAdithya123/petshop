@@ -22,6 +22,10 @@ Future<List<OrderLine>> _requestOrderItems(String orderId) async {
   ];
 }
 
+/// Forgets every cached request: after signing out (so the next account never
+/// sees a previous one's items) and on pull-to-refresh.
+void clearOrderItemsCache() => _orderItemsRequests.clear();
+
 Future<List<OrderLine>> fetchOrderItems(String orderId) {
   final cached = _orderItemsRequests[orderId];
   if (cached != null) return cached;

@@ -1,12 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/app_error.dart' as app_error;
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
+import '../skeletons.dart';
 import '../ui_kit.dart';
 
 /// Small helpers shared by the "My account" screens (the Flutter counterparts
 /// of AccountPage.jsx and accountHelpers.js on the web).
+
+/// Price text on white (pink-700, about 6:1; the brand pink is only ~3.5:1).
+const kAccountPriceColor = Color(0xFFBE185D);
+
+/// Fill for pink call-to-action buttons carrying white text (passes 4.5:1).
+const kAccountCtaColor = Color(0xFFDB2777);
 
 const _orderTypeLabels = {
   'pet_reservation': 'Pet reservation',
@@ -63,6 +71,20 @@ DateTime? asDate(Object? value) {
   return null;
 }
 
+// -- error text ----------------------------------------------------------------
+
+/// Error text for a call to one of the not-yet-deployed RPC functions: a
+/// missing function gets the "isn't available yet" wording instead of a raw
+/// server message. Everything else goes through [errorText].
+String rpcErrorText(Object error) =>
+    app_error.isRpcNotDeployedError(error) ? app_error.kRpcNotDeployedError : errorText(error);
+
+/// Shown when a write was accepted by the API but blocked by the database
+/// (an UPDATE that matched no rows).
+const changeBlockedMessage = app_error.kStaleStatusError;
+
+// -- building blocks ---------------------------------------------------------
+
 /// Section heading ("Orders", "Your details", ...).
 class SectionTitle extends StatelessWidget {
   final String title;
@@ -70,31 +92,22 @@ class SectionTitle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Text(title, style: AppTheme.display(fontSize: 20, fontWeight: FontWeight.w600));
+    return Semantics(
+      header: true,
+      child: Text(title, style: AppTheme.display(fontSize: 20, fontWeight: FontWeight.w600)),
+    );
   }
 }
 
-/// Inline "Loading..." line for data that loads inside an account screen.
+/// Loading placeholder for data that loads inside an account screen: a few
+/// card-shaped skeleton blocks.
 class AccountLoadingNote extends StatelessWidget {
-  final String label;
-  const AccountLoadingNote({super.key, this.label = 'Loading…'});
+  final int count;
+  final double itemHeight;
+  const AccountLoadingNote({super.key, this.count = 3, this.itemHeight = 92});
 
   @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 32),
-      child: Center(
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
-            const SizedBox(width: 12),
-            Text(label, style: AppTheme.body(color: AppColors.inkSoft)),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => ListSkeleton(count: count, itemHeight: itemHeight);
 }
 
 /// Load failure with the server's message and an optional retry
@@ -106,25 +119,75 @@ class AccountErrorNote extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        NoticeBox.error(message: message),
-        if (onRetry != null) ...[
-          const SizedBox(height: 12),
-          OutlinedButton.icon(
-            onPressed: onRetry,
-            icon: const Icon(Icons.refresh, size: 18),
-            label: const Text('Try again'),
-          ),
+    return Semantics(
+      liveRegion: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          NoticeBox.error(message: message),
+          if (onRetry != null) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('Retry'),
+            ),
+          ],
         ],
-      ],
+      ),
     );
   }
 }
 
-/// Section heading with a small refresh button on the right. Stands in for
-/// pull-to-refresh, which AccountScaffold's scrolling body can't host.
+/// Footer of a paged list: a "Load more" button that shows a spinner while it
+/// loads and the last error (with a retry) when it failed.
+class LoadMoreButton extends StatelessWidget {
+  final String label;
+  final bool loading;
+  final String? error;
+  final VoidCallback onPressed;
+
+  const LoadMoreButton({
+    super.key,
+    required this.onPressed,
+    this.label = 'Load more',
+    this.loading = false,
+    this.error,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final failed = error != null && error!.isNotEmpty;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (failed) ...[
+            Text(
+              error!,
+              textAlign: TextAlign.center,
+              style: AppTheme.body(fontSize: 13, color: AppColors.error),
+            ),
+            const SizedBox(height: 8),
+          ],
+          OutlinedButton(
+            onPressed: loading ? null : onPressed,
+            child: loading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Text(failed ? 'Try again' : label),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Section heading with a small refresh button on the right. Pull-to-refresh
+/// does the same job; the button is the non-gesture alternative.
 class RefreshHeading extends StatelessWidget {
   final String title;
   final VoidCallback? onRefresh;

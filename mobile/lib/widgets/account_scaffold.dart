@@ -5,8 +5,11 @@ import 'package:go_router/go_router.dart';
 import '../models/models.dart';
 import '../state/auth_provider.dart';
 import '../theme/app_theme.dart';
+import 'account/account_widgets.dart';
+import 'content_width.dart';
 import 'role_shell.dart';
 import 'shared_widgets.dart';
+import 'skeletons.dart';
 import 'ui_kit.dart';
 
 class _AccountSection {
@@ -30,32 +33,73 @@ const _accountSections = [
   _AccountSection('Sell on PETSTA', '/account/sell', Icons.storefront_outlined, customersOnly: true),
 ];
 
-class AccountNav extends StatelessWidget {
+class AccountNav extends StatefulWidget {
   final String currentPath;
   final bool isCustomer;
   const AccountNav({super.key, required this.currentPath, required this.isCustomer});
 
   @override
+  State<AccountNav> createState() => _AccountNavState();
+}
+
+class _AccountNavState extends State<AccountNav> {
+  final GlobalKey _activeKey = GlobalKey();
+
+  @override
+  void initState() {
+    super.initState();
+    // Bring the current section's chip into view (e.g. "Learn" sits off-screen).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final activeContext = _activeKey.currentContext;
+      if (!mounted || activeContext == null) return;
+      Scrollable.ensureVisible(
+        activeContext,
+        alignment: 0.5,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final sections = _accountSections.where((s) => !s.customersOnly || isCustomer).toList();
+    final sections = _accountSections.where((s) => !s.customersOnly || widget.isCustomer).toList();
     return Container(
       decoration: const BoxDecoration(
         color: AppColors.surface,
         border: Border(bottom: BorderSide(color: AppColors.border)),
       ),
-      height: 52,
-      child: ListView.separated(
+      height: 56,
+      child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        itemCount: sections.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, index) {
-          final section = sections[index];
-          final active = section.path == currentPath;
-          return InkWell(
-            borderRadius: BorderRadius.circular(999),
-            onTap: active ? null : () => context.go(section.path),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(
+          children: [
+            for (var index = 0; index < sections.length; index++) ...[
+              if (index > 0) const SizedBox(width: 8),
+              _buildChip(context, sections[index]),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChip(BuildContext context, _AccountSection section) {
+    final active = section.path == widget.currentPath;
+    // The tappable area is 48dp tall; the visible pill inside it is 36dp.
+    return Semantics(
+      button: true,
+      selected: active,
+      child: InkWell(
+        key: active ? _activeKey : null,
+        customBorder: const StadiumBorder(),
+        onTap: active ? null : () => context.go(section.path),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 48),
+          child: Center(
             child: Container(
+              constraints: const BoxConstraints(minHeight: 36),
               padding: const EdgeInsets.symmetric(horizontal: 14),
               decoration: BoxDecoration(
                 color: active ? AppColors.primary.withValues(alpha: 0.1) : Colors.transparent,
@@ -64,6 +108,7 @@ class AccountNav extends StatelessWidget {
               ),
               alignment: Alignment.center,
               child: Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(section.icon, size: 16, color: active ? AppColors.primary : AppColors.inkSoft),
                   const SizedBox(width: 6),
@@ -78,21 +123,79 @@ class AccountNav extends StatelessWidget {
                 ],
               ),
             ),
-          );
-        },
+          ),
+        ),
       ),
     );
   }
 }
 
+/// The action behind an [AccountScaffold]'s pull-to-refresh. The screen body
+/// registers its reload function here (see [AccountRefreshMixin]).
+class AccountRefreshHandle {
+  Future<void> Function()? _action;
+
+  void attach(Future<void> Function() action) => _action = action;
+
+  void detach(Future<void> Function() action) {
+    if (_action == action) _action = null;
+  }
+
+  /// Runs the registered reload; completes at once when nothing is registered.
+  Future<void> run() async {
+    final action = _action;
+    if (action != null) await action();
+  }
+}
+
+/// Makes the [AccountRefreshHandle] of the enclosing [AccountScaffold]
+/// available to its body.
+class AccountRefreshScope extends InheritedWidget {
+  final AccountRefreshHandle handle;
+
+  const AccountRefreshScope({super.key, required this.handle, required super.child});
+
+  static AccountRefreshHandle? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<AccountRefreshScope>()?.handle;
+
+  @override
+  bool updateShouldNotify(AccountRefreshScope oldWidget) => handle != oldWidget.handle;
+}
+
+/// Mix into the [State] of an [AccountScaffold] body to make pull-to-refresh
+/// reload that screen: implement [refreshAccountData] and return the future
+/// that finishes when the data is up to date (it ends the spinner).
+mixin AccountRefreshMixin<T extends StatefulWidget> on State<T> {
+  AccountRefreshHandle? _refreshHandle;
+
+  Future<void> refreshAccountData();
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final handle = AccountRefreshScope.maybeOf(context);
+    if (!identical(handle, _refreshHandle)) {
+      _refreshHandle?.detach(refreshAccountData);
+      _refreshHandle = handle;
+      handle?.attach(refreshAccountData);
+    }
+  }
+
+  @override
+  void dispose() {
+    _refreshHandle?.detach(refreshAccountData);
+    super.dispose();
+  }
+}
+
 /// Chrome for every "My account" screen: app bar + drawer (RoleShell), the
 /// account section chips, a login gate for signed-out visitors, and a
-/// scrollable body with a heading.
+/// pull-to-refresh scrollable body with a heading.
 ///
 /// [builder] output is placed inside a SingleChildScrollView, so return
 /// non-scrolling content (Column, or a shrinkWrapped ListView with
 /// NeverScrollableScrollPhysics) -- no Expanded/Flexible at the top level.
-class AccountScaffold extends ConsumerWidget {
+class AccountScaffold extends ConsumerStatefulWidget {
   /// Route path of the screen, used to highlight its chip (e.g. '/account/orders').
   final String path;
   final String title;
@@ -110,21 +213,42 @@ class AccountScaffold extends ConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<AccountScaffold> createState() => _AccountScaffoldState();
+}
+
+class _AccountScaffoldState extends ConsumerState<AccountScaffold> {
+  final AccountRefreshHandle _refresh = AccountRefreshHandle();
+
+  @override
+  Widget build(BuildContext context) {
     final auth = ref.watch(authControllerProvider);
 
     if (auth.status == AuthStatus.loading) {
-      return const RoleShell(title: 'My account', child: LoadingView());
+      return RoleShell(
+        title: 'My account',
+        child: SingleChildScrollView(
+          padding: kScreenPadding,
+          child: ContentWidth(
+            // The session is fine but the profile could not be loaded (for
+            // example no connection): say so and let the user retry.
+            child: auth.profileFailed
+                ? AccountErrorNote(
+                    message: "We couldn't load your account. Check your connection and try again.",
+                    onRetry: () => ref.read(authControllerProvider).refreshProfile(),
+                  )
+                : const ListSkeleton(),
+          ),
+        ),
+      );
     }
 
     final profile = auth.profile;
     if (auth.status != AuthStatus.signedIn || profile == null) {
       return RoleShell(
         title: 'My account',
-        child: Padding(
+        child: SingleChildScrollView(
           padding: kScreenPadding,
-          child: const Align(
-            alignment: Alignment.topCenter,
+          child: const ContentWidth(
             child: LoginPromptCard(
               title: 'Log in to see your account',
               description: 'Your orders, wishlist, refunds, addresses and demo requests live here.',
@@ -138,17 +262,35 @@ class AccountScaffold extends ConsumerWidget {
       title: 'My account',
       child: Column(
         children: [
-          AccountNav(currentPath: path, isCustomer: profile.role == 'customer'),
+          AccountNav(currentPath: widget.path, isCustomer: profile.role == 'customer'),
           Expanded(
-            child: SingleChildScrollView(
-              padding: kScreenPadding,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  ScreenHeader(title: title, subtitle: subtitle, trailing: headerTrailing),
-                  const SizedBox(height: 18),
-                  builder(context, profile),
-                ],
+            child: RefreshIndicator(
+              color: AppColors.primary,
+              onRefresh: _refresh.run,
+              child: SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                padding: kScreenPadding,
+                child: ContentWidth(
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: AccountRefreshScope(
+                      handle: _refresh,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          ScreenHeader(
+                            title: widget.title,
+                            subtitle: widget.subtitle,
+                            trailing: widget.headerTrailing,
+                          ),
+                          const SizedBox(height: 18),
+                          widget.builder(context, profile),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),

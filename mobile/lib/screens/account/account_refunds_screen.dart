@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show PostgrestException;
 
 import '../../models/service_models.dart';
 import '../../services/supabase_service.dart';
@@ -69,7 +70,7 @@ class _RefundsBody extends StatefulWidget {
   State<_RefundsBody> createState() => _RefundsBodyState();
 }
 
-class _RefundsBodyState extends State<_RefundsBody> {
+class _RefundsBodyState extends State<_RefundsBody> with AccountRefreshMixin<_RefundsBody> {
   bool _loading = true;
   bool _hasLoaded = false;
   String? _loadError;
@@ -137,6 +138,9 @@ class _RefundsBodyState extends State<_RefundsBody> {
     if (open.any((group) => group.shopId == _selectedShopId)) return _selectedShopId;
     return open.length == 1 ? open.first.shopId : '';
   }
+
+  @override
+  Future<void> refreshAccountData() => _load();
 
   void _retryLoad() {
     setState(() {
@@ -233,6 +237,8 @@ class _RefundsBodyState extends State<_RefundsBody> {
   }
 
   Future<void> _submit() async {
+    if (_submitting) return;
+    FocusScope.of(context).unfocus();
     final orderId = _orderId;
     final shopId = _shopId;
     final notes = _notesController.text.trim();
@@ -242,6 +248,8 @@ class _RefundsBodyState extends State<_RefundsBody> {
       errors['order'] = 'Choose the order this refund is for.';
     } else if (shopId.isEmpty) {
       errors['shop'] = 'Choose what the refund is for.';
+    } else if (_refundsForOrder.containsKey(shopId)) {
+      errors['shop'] = "You've already requested a refund from this shop for this order.";
     }
     if (_reason.isEmpty) errors['reason'] = "Tell us why you're asking for a refund.";
     if (_reason == 'Other' && notes.isEmpty) errors['notes'] = 'Add a few words so the shop knows what happened.';
@@ -253,7 +261,10 @@ class _RefundsBodyState extends State<_RefundsBody> {
     if (errors.isNotEmpty) return;
 
     final group = _groups.firstWhere((candidate) => candidate.shopId == shopId);
-    setState(() => _submitting = true);
+    setState(() {
+      _submitting = true;
+      _selectedShopId = shopId;
+    });
     try {
       // The server fills in the amount (that shop's total on the order) and
       // the pending status.
@@ -267,10 +278,14 @@ class _RefundsBodyState extends State<_RefundsBody> {
       });
     } catch (error) {
       if (!mounted) return;
+      final duplicate = error is PostgrestException && error.code == '23505';
       setState(() {
         _submitting = false;
-        _formError = errorText(error);
+        _formError = duplicate
+            ? "You've already requested a refund from this shop for this order."
+            : errorText(error);
       });
+      if (duplicate) await _load();
       return;
     }
     if (!mounted) return;
@@ -455,6 +470,8 @@ class _RefundsBodyState extends State<_RefundsBody> {
             controller: _notesController,
             minLines: 3,
             maxLines: 5,
+            maxLength: 500,
+            enabled: !_submitting,
             textCapitalization: TextCapitalization.sentences,
             decoration: InputDecoration(
               helperText: 'Anything the shop should know.',
@@ -606,22 +623,20 @@ class _RefundCard extends StatelessWidget {
                           style: AppTheme.body(fontWeight: FontWeight.w600),
                         ),
                         const SizedBox(height: 2),
-                        Wrap(
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          children: [
-                            if (shopName.isNotEmpty)
-                              Text(
-                                '$shopName · ',
-                                style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
-                              ),
-                            InkWell(
-                              onTap: () => context.go('/account/orders'),
-                              child: Text(
-                                'Order ${orderRef(refund.orderId)}',
-                                style: AppTheme.body(fontSize: 13, color: AppColors.primary),
-                              ),
-                            ),
-                          ],
+                        if (shopName.isNotEmpty)
+                          Text(shopName, style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
+                        TextButton(
+                          onPressed: () => context.go('/account/orders'),
+                          style: TextButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            minimumSize: const Size(48, 40),
+                            tapTargetSize: MaterialTapTargetSize.padded,
+                            alignment: Alignment.centerLeft,
+                          ),
+                          child: Text(
+                            'Order ${orderRef(refund.orderId)}',
+                            style: AppTheme.body(fontSize: 13, color: AppColors.primary),
+                          ),
                         ),
                       ],
                     ),
@@ -635,7 +650,7 @@ class _RefundCard extends StatelessWidget {
                         const SizedBox(height: 6),
                         Text(
                           formatPrice(refund.amount),
-                          style: AppTheme.display(fontSize: 17, fontWeight: FontWeight.w600, color: AppColors.accent),
+                          style: AppTheme.display(fontSize: 17, fontWeight: FontWeight.w600, color: kAccountPriceColor),
                         ),
                       ],
                     ],

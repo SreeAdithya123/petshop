@@ -1,6 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show PostgrestException;
 
 import '../data/columns.dart';
 import '../models/models.dart';
@@ -9,10 +12,11 @@ import '../state/catalog_provider.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../utils/pet_filters.dart';
+import '../widgets/content_width.dart';
 import '../widgets/pet_widgets.dart';
 import '../widgets/role_shell.dart';
 import '../widgets/shared_widgets.dart';
-import '../widgets/ui_kit.dart';
+import '../widgets/skeletons.dart';
 
 /// Species are free text on the seller side, so emoji are looked up
 /// case-insensitively (see categoryStyle in src/pages/Home.jsx).
@@ -42,6 +46,8 @@ const _whyPetsta = [
   (icon: Icons.verified_outlined, title: 'Licensed shops only', desc: 'Every seller is a verified dealer'),
 ];
 
+final _emailPattern = RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$');
+
 /// Mirrors src/pages/Home.jsx: gradient hero, why-us icons, entry cards for
 /// Services / Health / Store, real catalog totals, a live Supabase-backed
 /// featured-products strip, popular breeds, trending/top picks, top-rated
@@ -57,7 +63,7 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   List<Product> _featuredProducts = [];
   final _newsletterController = TextEditingController();
-  String _newsletterState = 'idle'; // idle | sending | done | error
+  String _newsletterState = 'idle'; // idle | invalid | sending | done | error
 
   @override
   void initState() {
@@ -101,8 +107,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Future<void> _submitNewsletter() async {
+    if (_newsletterState == 'sending') return;
     final email = _newsletterController.text.trim();
-    if (email.isEmpty) return;
+    if (!_emailPattern.hasMatch(email)) {
+      setState(() => _newsletterState = 'invalid');
+      return;
+    }
+    FocusScope.of(context).unfocus();
     setState(() => _newsletterState = 'sending');
     try {
       await SupabaseService.client.from('newsletter_subscribers').insert({'email': email});
@@ -113,7 +124,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       });
     } catch (error) {
       if (!mounted) return;
-      final isDuplicate = error.toString().toLowerCase().contains('duplicate');
+      final isDuplicate = (error is PostgrestException && error.code == '23505') ||
+          error.toString().toLowerCase().contains('duplicate');
       setState(() => _newsletterState = isDuplicate ? 'done' : 'error');
     }
   }
@@ -121,9 +133,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final catalogAsync = ref.watch(catalogProvider);
-    final loading = catalogAsync.isLoading && !catalogAsync.hasValue;
-    final failed = catalogAsync.hasError && !catalogAsync.isLoading;
-    final catalog = failed ? null : catalogAsync.value;
+    // `value` keeps the last loaded catalog while a refresh runs or fails.
+    final catalog = catalogAsync.value;
+    final loading = catalogAsync.isInitialLoad;
+    final failed = catalogAsync.hasFailed;
     // Non-null only when there is something to show (promotes cleanly below).
     final shown = (catalog != null && catalog.pets.isNotEmpty) ? catalog : null;
 
@@ -138,71 +151,81 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     return RoleShell(
       title: 'PETSTA',
+      actions: const [CartAppBarAction()],
       child: RefreshIndicator(
         onRefresh: _refresh,
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(16, 20, 16, 40),
           children: [
-            _Hero(badge: badge),
-            const SizedBox(height: 32),
-            const _WhyPetsta(),
-            const SizedBox(height: 24),
-            const _ExploreLinks(),
-            if (loading) ...[
-              const SizedBox(height: 32),
-              const _HomeSkeleton(),
-            ],
-            if (failed) ...[
-              const SizedBox(height: 24),
-              EmptyState(
-                title: "We couldn't load pets right now",
-                description: errorText(catalogAsync.error ?? 'Something went wrong.'),
-                action: ElevatedButton(
-                  onPressed: () => ref.invalidate(catalogProvider),
-                  child: const Text('Try again'),
-                ),
+            ContentWidth(
+              maxWidth: 1000,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _Hero(badge: badge),
+                  const SizedBox(height: 32),
+                  const _WhyPetsta(),
+                  const SizedBox(height: 24),
+                  const _ExploreLinks(),
+                  if (loading) ...[
+                    const SizedBox(height: 32),
+                    const _HomeSkeleton(),
+                  ],
+                  if (failed) ...[
+                    const SizedBox(height: 24),
+                    CommerceRetryView(
+                      title: "We couldn't load pets right now",
+                      error: catalogAsync.error,
+                      onRetry: () => ref.invalidate(catalogProvider),
+                    ),
+                  ],
+                  if (catalog != null && catalog.pets.isEmpty) ...[
+                    const SizedBox(height: 24),
+                    EmptyState(
+                      title: 'No pets listed right now',
+                      description: "Shops haven't listed any pets yet. Check back soon.",
+                      action: ElevatedButton(
+                        onPressed: () => context.push('/sellers'),
+                        child: const Text('Browse shops'),
+                      ),
+                    ),
+                  ],
+                  if (shown != null) ...[
+                    const SizedBox(height: 32),
+                    _StatsRow(
+                      petCount: shown.pets.length,
+                      shopCount: shown.shops.length,
+                      speciesCount: shown.speciesList.length,
+                    ),
+                  ],
+                  if (_featuredProducts.isNotEmpty) ...[
+                    const SizedBox(height: 32),
+                    _SectionHeader(
+                      title: '🔥 Featured products',
+                      actionLabel: 'View all',
+                      onAction: () => context.push('/store'),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      height: 130 + (petTextScale(context) - 1) * 90,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _featuredProducts.length,
+                        separatorBuilder: (context, index) => const SizedBox(width: 12),
+                        itemBuilder: (context, index) => _FeaturedProductCard(product: _featuredProducts[index]),
+                      ),
+                    ),
+                  ],
+                  if (shown != null) ..._catalogSections(shown),
+                  const SizedBox(height: 32),
+                  _NewsletterCard(
+                    controller: _newsletterController,
+                    state: _newsletterState,
+                    onSubmit: _submitNewsletter,
+                  ),
+                ],
               ),
-            ],
-            if (catalog != null && catalog.pets.isEmpty) ...[
-              const SizedBox(height: 24),
-              EmptyState(
-                title: 'No pets listed right now',
-                description: "Shops haven't listed any pets yet. Check back soon.",
-                action: ElevatedButton(
-                  onPressed: () => context.push('/sellers'),
-                  child: const Text('Browse shops'),
-                ),
-              ),
-            ],
-            if (shown != null) ...[
-              const SizedBox(height: 32),
-              _StatsRow(
-                petCount: shown.pets.length,
-                shopCount: shown.shops.length,
-                speciesCount: shown.speciesList.length,
-              ),
-            ],
-            if (_featuredProducts.isNotEmpty) ...[
-              const SizedBox(height: 32),
-              _SectionHeader(title: '🔥 Featured products', actionLabel: 'View all', onAction: () => context.push('/store')),
-              const SizedBox(height: 12),
-              SizedBox(
-                height: 130,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _featuredProducts.length,
-                  separatorBuilder: (context, index) => const SizedBox(width: 12),
-                  itemBuilder: (context, index) => _FeaturedProductCard(product: _featuredProducts[index]),
-                ),
-              ),
-            ],
-            if (shown != null) ..._catalogSections(shown),
-            const SizedBox(height: 32),
-            _NewsletterCard(
-              controller: _newsletterController,
-              state: _newsletterState,
-              onSubmit: _submitNewsletter,
             ),
           ],
         ),
@@ -229,17 +252,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ..sort((a, b) => catalog.statsFor(b.id).rating.compareTo(catalog.statsFor(a.id).rating));
     final shopsAreRated = ratedShops.isNotEmpty;
     final featuredShops = (shopsAreRated ? ratedShops : catalog.shops).take(3).toList();
+    final tileExtent = 76 * petTextScale(context);
 
     return [
       const SizedBox(height: 32),
       _SectionHeader(title: '🐾 Popular breeds', actionLabel: 'Explore all', onAction: () => context.push('/pets')),
       const SizedBox(height: 12),
-      GridView.count(
-        crossAxisCount: 2,
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        crossAxisSpacing: 12,
-        mainAxisSpacing: 12,
+      _ResponsiveGrid(
+        minTileWidth: 140,
+        minColumns: 2,
+        spacing: 12,
         childAspectRatio: 0.95,
         children: [
           for (final entry in breeds)
@@ -260,9 +282,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       _PetStrip(pets: topPicks, catalog: catalog),
       if (featuredShops.isNotEmpty) ...[
         const SizedBox(height: 32),
-        Text(
-          shopsAreRated ? '⭐ Top-rated shops' : '🏬 Local shops',
-          style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700),
+        Semantics(
+          header: true,
+          child: Text(
+            shopsAreRated ? '⭐ Top-rated shops' : '🏬 Local shops',
+            style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700),
+          ),
         ),
         const SizedBox(height: 12),
         for (final shop in featuredShops)
@@ -276,13 +301,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
       ],
       const SizedBox(height: 32),
-      GridView.count(
-        crossAxisCount: 3,
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        crossAxisSpacing: 10,
-        mainAxisSpacing: 10,
-        childAspectRatio: 1,
+      _ResponsiveGrid(
+        minTileWidth: 84,
+        minColumns: 3,
+        spacing: 10,
+        mainAxisExtent: tileExtent,
         children: [
           for (final species in catalog.speciesList)
             _CategoryTile(
@@ -295,12 +318,59 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 }
 
+/// Non-scrolling grid whose column count follows the available width (never
+/// fewer than [minColumns]) so it reads well on phones and tablets alike.
+/// Give either a [childAspectRatio] or a fixed [mainAxisExtent] for the rows.
+class _ResponsiveGrid extends StatelessWidget {
+  final double minTileWidth;
+  final int minColumns;
+  final double spacing;
+  final double childAspectRatio;
+  final double? mainAxisExtent;
+  final List<Widget> children;
+
+  const _ResponsiveGrid({
+    required this.minTileWidth,
+    required this.minColumns,
+    required this.spacing,
+    this.childAspectRatio = 1,
+    this.mainAxisExtent,
+    required this.children,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final fit = ((constraints.maxWidth + spacing) / (minTileWidth + spacing)).floor();
+        return GridView(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: math.max(minColumns, fit),
+            crossAxisSpacing: spacing,
+            mainAxisSpacing: spacing,
+            childAspectRatio: childAspectRatio,
+            mainAxisExtent: mainAxisExtent,
+          ),
+          children: children,
+        );
+      },
+    );
+  }
+}
+
 class _Hero extends StatelessWidget {
   final String badge;
   const _Hero({required this.badge});
 
   @override
   Widget build(BuildContext context) {
+    // The headline scales with the screen (and, on top of that, the system
+    // text size): ~27 on a 320dp phone, 32+ on larger ones.
+    final width = MediaQuery.sizeOf(context).width;
+    final headlineSize = (width * 0.085).clamp(26.0, 40.0).toDouble();
+
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
@@ -332,26 +402,29 @@ class _Hero extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          Text.rich(
-            TextSpan(
-              style: AppTheme.display(fontSize: 32, fontWeight: FontWeight.w800, color: Colors.white),
-              children: [
-                const TextSpan(text: 'The '),
-                TextSpan(
-                  text: 'smartest',
-                  style: TextStyle(
-                    decoration: TextDecoration.underline,
-                    decorationColor: Colors.pink[300],
-                    decorationThickness: 2,
+          Semantics(
+            header: true,
+            child: Text.rich(
+              TextSpan(
+                style: AppTheme.display(fontSize: headlineSize, fontWeight: FontWeight.w800, color: Colors.white),
+                children: [
+                  const TextSpan(text: 'The '),
+                  TextSpan(
+                    text: 'smartest',
+                    style: TextStyle(
+                      decoration: TextDecoration.underline,
+                      decorationColor: Colors.pink[300],
+                      decorationThickness: 2,
+                    ),
                   ),
-                ),
-                const TextSpan(text: ' way to find your best friend'),
-              ],
+                  const TextSpan(text: ' way to find your best friend'),
+                ],
+              ),
             ),
           ),
           const SizedBox(height: 12),
           Text(
-            'From trusted local shops to your doorstep visit — browse, reserve, and pick up in person. '
+            'Browse pets from trusted local shops, reserve online and pick up in person. '
             'Nothing ships.',
             style: AppTheme.body(fontSize: 15, color: Colors.white.withValues(alpha: 0.9)),
           ),
@@ -406,49 +479,79 @@ class _TrustBadge extends StatelessWidget {
   }
 }
 
+/// Four reassurance cards. Laid out in rows of equal-height cards (rather than
+/// a fixed-ratio grid) so the text can never overflow at large text sizes.
 class _WhyPetsta extends StatelessWidget {
   const _WhyPetsta();
 
   @override
   Widget build(BuildContext context) {
-    return GridView.count(
-      crossAxisCount: 2,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisSpacing: 12,
-      mainAxisSpacing: 12,
-      childAspectRatio: 1.5,
-      children: [
-        for (final item in _whyPetsta)
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              border: Border.all(color: AppColors.border),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(item.icon, size: 26, color: AppColors.primary),
-                const SizedBox(height: 6),
-                Text(
-                  item.title,
-                  style: AppTheme.display(fontSize: 12.5, fontWeight: FontWeight.w700),
-                  textAlign: TextAlign.center,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = constraints.maxWidth >= 640 ? 4 : 2;
+        final rows = <Widget>[];
+        for (var start = 0; start < _whyPetsta.length; start += columns) {
+          final slice = _whyPetsta.skip(start).take(columns).toList();
+          rows.add(
+            Padding(
+              padding: EdgeInsets.only(top: start == 0 ? 0 : 12),
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (var i = 0; i < columns; i++) ...[
+                      if (i > 0) const SizedBox(width: 12),
+                      Expanded(
+                        child: i < slice.length
+                            ? _WhyCard(icon: slice[i].icon, title: slice[i].title, desc: slice[i].desc)
+                            : const SizedBox.shrink(),
+                      ),
+                    ],
+                  ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  item.desc,
-                  style: AppTheme.body(fontSize: 10.5, color: AppColors.inkSoft),
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
+              ),
             ),
+          );
+        }
+        return Column(children: rows);
+      },
+    );
+  }
+}
+
+class _WhyCard extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String desc;
+  const _WhyCard({required this.icon, required this.title, required this.desc});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        border: Border.all(color: AppColors.border),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 26, color: AppColors.primary),
+          const SizedBox(height: 6),
+          Text(
+            title,
+            style: AppTheme.display(fontSize: 12.5, fontWeight: FontWeight.w700),
+            textAlign: TextAlign.center,
           ),
-      ],
+          const SizedBox(height: 2),
+          Text(
+            desc,
+            style: AppTheme.body(fontSize: 11, color: AppColors.inkSoft),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
     );
   }
 }
@@ -495,7 +598,7 @@ class _ExploreLinks extends StatelessWidget {
                             Text(
                               link.desc,
                               style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
-                              maxLines: 1,
+                              maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                             ),
                           ],
@@ -519,16 +622,24 @@ class _HomeSkeleton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SkeletonPulse(
-      child: SizedBox(
-        height: kPetStripHeight,
-        child: ListView.separated(
-          scrollDirection: Axis.horizontal,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: 3,
-          separatorBuilder: (context, index) => const SizedBox(width: 14),
-          itemBuilder: (context, index) => const SizedBox(width: 168, child: PetCardSkeleton()),
-        ),
+    return Semantics(
+      label: 'Loading pets',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SkeletonBox(width: 150, height: 20),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: petStripHeight(context),
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: 3,
+              separatorBuilder: (context, index) => const SizedBox(width: 14),
+              itemBuilder: (context, index) => const SizedBox(width: 168, child: PetCardSkeleton()),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -542,14 +653,18 @@ class _StatsRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(child: _StatCounter(target: petCount, label: 'Pets listed')),
-        const SizedBox(width: 10),
-        Expanded(child: _StatCounter(target: shopCount, label: 'Local shops')),
-        const SizedBox(width: 10),
-        Expanded(child: _StatCounter(target: speciesCount, label: 'Species available')),
-      ],
+    // IntrinsicHeight keeps the three cards the same height when one label wraps.
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(child: _StatCounter(target: petCount, label: 'Pets listed')),
+          const SizedBox(width: 10),
+          Expanded(child: _StatCounter(target: shopCount, label: 'Local shops')),
+          const SizedBox(width: 10),
+          Expanded(child: _StatCounter(target: speciesCount, label: 'Species available')),
+        ],
+      ),
     );
   }
 }
@@ -590,36 +705,42 @@ class _StatCounterState extends State<_StatCounter> with SingleTickerProviderSta
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        border: Border.all(color: AppColors.border),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: AnimatedBuilder(
-        animation: _animation,
-        builder: (context, child) {
-          final value = (widget.target * _animation.value).round();
-          return Column(
-            children: [
-              ShaderMask(
-                blendMode: BlendMode.srcIn,
-                shaderCallback: (bounds) => AppColors.heroGradient.createShader(bounds),
-                child: Text(
-                  '$value',
-                  style: AppTheme.display(fontSize: 24, fontWeight: FontWeight.w800, color: Colors.white),
+    // Screen readers get the final figure straight away, not the count-up.
+    return Semantics(
+      label: '${widget.target} ${widget.label}',
+      excludeSemantics: true,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 4),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          border: Border.all(color: AppColors.border),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: AnimatedBuilder(
+          animation: _animation,
+          builder: (context, child) {
+            final value = (widget.target * _animation.value).round();
+            return Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                ShaderMask(
+                  blendMode: BlendMode.srcIn,
+                  shaderCallback: (bounds) => AppColors.heroGradient.createShader(bounds),
+                  child: Text(
+                    '$value',
+                    style: AppTheme.display(fontSize: 24, fontWeight: FontWeight.w800, color: Colors.white),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                widget.label,
-                style: AppTheme.body(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.inkSoft),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          );
-        },
+                const SizedBox(height: 4),
+                Text(
+                  widget.label,
+                  style: AppTheme.body(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.inkSoft),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -635,7 +756,12 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Expanded(child: Text(title, style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700))),
+        Expanded(
+          child: Semantics(
+            header: true,
+            child: Text(title, style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700)),
+          ),
+        ),
         TextButton(onPressed: onAction, child: Text(actionLabel)),
       ],
     );
@@ -655,7 +781,12 @@ class _StripTitle extends StatelessWidget {
       children: [
         Icon(icon, size: 20, color: color),
         const SizedBox(width: 6),
-        Text(title, style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700)),
+        Expanded(
+          child: Semantics(
+            header: true,
+            child: Text(title, style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w700)),
+          ),
+        ),
       ],
     );
   }
@@ -670,7 +801,7 @@ class _PetStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: kPetStripHeight,
+      height: petStripHeight(context),
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: pets.length,
@@ -694,44 +825,61 @@ class _FeaturedProductCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final shopName = product.shop?.name ?? '';
-    return InkWell(
-      onTap: () => context.push('/store/${product.id}'),
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        width: 150,
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          border: Border.all(color: AppColors.border),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              titleCase(product.category),
-              style: AppTheme.body(fontSize: 11, color: AppColors.inkSoft),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              product.name,
-              style: AppTheme.body(fontSize: 13.5, fontWeight: FontWeight.w600),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            if (shopName.isNotEmpty)
+    final label = [
+      product.name,
+      titleCase(product.category),
+      if (shopName.isNotEmpty) 'sold by $shopName',
+      formatPrice(product.price),
+    ].join(', ');
+    void open() => context.push('/store/${product.id}');
+    return Semantics(
+      button: true,
+      label: label,
+      onTap: open,
+      excludeSemantics: true,
+      child: InkWell(
+        onTap: open,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          width: 150,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            border: Border.all(color: AppColors.border),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
               Text(
-                shopName,
+                titleCase(product.category),
                 style: AppTheme.body(fontSize: 11, color: AppColors.inkSoft),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-            const Spacer(),
-            Text(
-              formatPrice(product.price),
-              style: AppTheme.display(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.accent),
-            ),
-          ],
+              const SizedBox(height: 2),
+              Text(
+                product.name,
+                style: AppTheme.body(fontSize: 13.5, fontWeight: FontWeight.w600),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              if (shopName.isNotEmpty)
+                Text(
+                  shopName,
+                  style: AppTheme.body(fontSize: 11, color: AppColors.inkSoft),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              const Spacer(),
+              Text(
+                formatPrice(product.price),
+                style: AppTheme.display(fontSize: 15, fontWeight: FontWeight.w700, color: kPetPriceColor),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -747,35 +895,41 @@ class _BreedCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final match = pet;
-    return InkWell(
+    return Semantics(
+      button: true,
+      label: 'Browse $breed',
       onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          border: Border.all(color: AppColors.border),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: PetPhotoView(
-                src: match == null ? null : petCoverPhoto(match),
-                species: match?.species ?? 'Dog',
+      excludeSemantics: true,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            border: Border.all(color: AppColors.border),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: PetPhotoView(
+                  src: match == null ? null : petCoverPhoto(match),
+                  species: match?.species ?? 'Dog',
+                ),
               ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              child: Text(
-                breed,
-                style: AppTheme.body(fontSize: 12.5, fontWeight: FontWeight.w600),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                child: Text(
+                  breed,
+                  style: AppTheme.body(fontSize: 12.5, fontWeight: FontWeight.w600),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -804,7 +958,12 @@ class _TopShopCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(shop.name, style: AppTheme.display(fontSize: 16, fontWeight: FontWeight.w600)),
+            Text(
+              shop.name,
+              style: AppTheme.display(fontSize: 16, fontWeight: FontWeight.w600),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
             const SizedBox(height: 6),
             if (stats.reviewCount > 0)
               RatingStarsView(rating: stats.rating, reviewCount: stats.reviewCount)
@@ -815,9 +974,11 @@ class _TopShopCard extends StatelessWidget {
               children: [
                 const Icon(Icons.pets, size: 15, color: AppColors.inkSoft),
                 const SizedBox(width: 5),
-                Text(
-                  '$petCount ${petCount == 1 ? 'pet' : 'pets'} listed',
-                  style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
+                Expanded(
+                  child: Text(
+                    '$petCount ${petCount == 1 ? 'pet' : 'pets'} listed',
+                    style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
+                  ),
                 ),
               ],
             ),
@@ -836,28 +997,37 @@ class _CategoryTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final emoji = _categoryEmoji[species.toLowerCase()] ?? '🐾';
-    return InkWell(
+    return Semantics(
+      button: true,
+      label: 'Browse $species',
       onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: Container(
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          border: Border.all(color: AppColors.border),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(emoji, style: const TextStyle(fontSize: 28)),
-            const SizedBox(height: 4),
-            Text(
-              species,
-              style: AppTheme.display(fontSize: 11.5, fontWeight: FontWeight.w700),
-              textAlign: TextAlign.center,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
+      excludeSemantics: true,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            border: Border.all(color: AppColors.border),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(emoji, style: const TextStyle(fontSize: 28)),
+              const SizedBox(height: 4),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  species,
+                  style: AppTheme.display(fontSize: 11.5, fontWeight: FontWeight.w700),
+                  textAlign: TextAlign.center,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -872,6 +1042,7 @@ class _NewsletterCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final sending = state == 'sending';
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -881,9 +1052,12 @@ class _NewsletterCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '📬 Join the PETSTA community',
-            style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w800, color: Colors.white),
+          Semantics(
+            header: true,
+            child: Text(
+              '📬 Join the PETSTA community',
+              style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w800, color: Colors.white),
+            ),
           ),
           const SizedBox(height: 6),
           Text(
@@ -892,17 +1066,20 @@ class _NewsletterCard extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           if (state == 'done')
-            Row(
-              children: [
-                const Icon(Icons.check_circle, color: Colors.white, size: 20),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    "You're subscribed — welcome to PETSTA.",
-                    style: AppTheme.body(fontWeight: FontWeight.w600, color: Colors.white),
+            Semantics(
+              liveRegion: true,
+              child: Row(
+                children: [
+                  const Icon(Icons.check_circle, color: Colors.white, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      "You're subscribed — welcome to PETSTA.",
+                      style: AppTheme.body(fontWeight: FontWeight.w600, color: Colors.white),
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             )
           else
             Column(
@@ -910,7 +1087,11 @@ class _NewsletterCard extends StatelessWidget {
               children: [
                 TextField(
                   controller: controller,
+                  enabled: !sending,
                   keyboardType: TextInputType.emailAddress,
+                  textInputAction: TextInputAction.done,
+                  autofillHints: const [AutofillHints.email],
+                  onSubmitted: (_) => onSubmit(),
                   style: AppTheme.body(color: AppColors.ink),
                   decoration: InputDecoration(
                     hintText: 'Your email address',
@@ -922,15 +1103,30 @@ class _NewsletterCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 10),
                 ElevatedButton(
-                  onPressed: state == 'sending' ? null : onSubmit,
-                  style: ElevatedButton.styleFrom(backgroundColor: Colors.white, foregroundColor: AppColors.primary),
-                  child: Text(state == 'sending' ? 'Subscribing…' : 'Subscribe'),
+                  onPressed: sending ? null : onSubmit,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: AppColors.primary,
+                    disabledBackgroundColor: Colors.white.withValues(alpha: 0.7),
+                  ),
+                  child: sending
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primary),
+                        )
+                      : const Text('Subscribe'),
                 ),
-                if (state == 'error') ...[
+                if (state == 'invalid' || state == 'error') ...[
                   const SizedBox(height: 8),
-                  Text(
-                    "Couldn't subscribe right now — try again in a moment.",
-                    style: AppTheme.body(fontSize: 12.5, color: Colors.pink.shade100),
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      state == 'invalid'
+                          ? 'Enter a valid email address.'
+                          : "Couldn't subscribe right now — try again in a moment.",
+                      style: AppTheme.body(fontSize: 12.5, color: Colors.pink.shade100),
+                    ),
                   ),
                 ],
               ],

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -40,12 +42,8 @@ const _rejectNotice = "The customer will see this request as rejected. The decis
 String _statusOf(RefundRequest refund) => refund.status;
 
 Future<WithCustomers<RefundRequest>> _fetchRefunds(String shopId) async {
-  final data = await SupabaseService.client
-      .from('refunds')
-      .select()
-      .eq('shop_id', shopId)
-      .order('created_at', ascending: false);
-  final rows = data.map(RefundRequest.fromJson).toList();
+  final data = await fetchAllRows(() => SupabaseService.client.from('refunds').select().eq('shop_id', shopId));
+  final rows = data.map(RefundRequest.fromJson).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
   return attachCustomers<RefundRequest>(rows, (refund) => refund.customerId);
 }
 
@@ -60,7 +58,9 @@ class _RefundsWorkspace extends ConsumerStatefulWidget {
 class _RefundsWorkspaceState extends ConsumerState<_RefundsWorkspace> {
   late final SellerQuery<WithCustomers<RefundRequest>> _query;
   String? _filter;
+  int _limit = kPageSize;
   String? _busyId;
+  String? _busyStatus;
 
   @override
   void initState() {
@@ -76,6 +76,7 @@ class _RefundsWorkspaceState extends ConsumerState<_RefundsWorkspace> {
   }
 
   Future<void> _decide(RefundRequest refund, String status) async {
+    if (_busyId != null) return;
     final approving = status == 'approved';
     final label = (refund.itemLabel ?? '').trim();
     final summary = [
@@ -93,7 +94,10 @@ class _RefundsWorkspaceState extends ConsumerState<_RefundsWorkspace> {
     );
     if (!confirmed || !mounted) return;
 
-    setState(() => _busyId = refund.id);
+    setState(() {
+      _busyId = refund.id;
+      _busyStatus = status;
+    });
     // Guard on "pending" so a decision made elsewhere in the meantime isn't overwritten.
     final failure = await updateRow(
       'refunds',
@@ -102,10 +106,15 @@ class _RefundsWorkspaceState extends ConsumerState<_RefundsWorkspace> {
       match: {'status': 'pending'},
     );
     if (!mounted) return;
-    setState(() => _busyId = null);
+    setState(() {
+      _busyId = null;
+      _busyStatus = null;
+    });
 
     if (failure != null) {
       showSnack(context, failure, error: true);
+      // A stale card (decided elsewhere) should show its real state.
+      if (failure == kNothingChanged) _query.reload();
       return;
     }
     showSnack(
@@ -132,6 +141,7 @@ class _RefundsWorkspaceState extends ConsumerState<_RefundsWorkspace> {
         // Open on "Pending" when there is something to decide, otherwise show everything.
         final active = _filter ?? (pendingCount > 0 ? 'pending' : 'all');
         final visible = applyStatusFilter(_filters, active, rows, _statusOf);
+        final shown = math.min(_limit, visible.length);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -153,7 +163,10 @@ class _RefundsWorkspaceState extends ConsumerState<_RefundsWorkspace> {
             FilterChipBar<String>(
               options: filterOptions(_filters, rows, _statusOf),
               selected: active,
-              onSelected: (value) => setState(() => _filter = value),
+              onSelected: (value) => setState(() {
+                _filter = value;
+                _limit = kPageSize;
+              }),
             ),
             const SizedBox(height: 16),
             if (data.customersError != null) ...[
@@ -169,8 +182,8 @@ class _RefundsWorkspaceState extends ConsumerState<_RefundsWorkspace> {
                       : 'No refund requests match this filter.',
                 ),
               )
-            else
-              for (final refund in visible)
+            else ...[
+              for (final refund in visible.take(shown))
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
                   child: RefundCard(
@@ -179,9 +192,16 @@ class _RefundsWorkspaceState extends ConsumerState<_RefundsWorkspace> {
                     customer: data.customers[refund.customerId],
                     readOnly: readOnly,
                     busy: _busyId == refund.id,
+                    busyStatus: _busyId == refund.id ? _busyStatus : null,
                     onDecide: (status) => _decide(refund, status),
                   ),
                 ),
+              LoadMoreButton(
+                shown: shown,
+                total: visible.length,
+                onPressed: () => setState(() => _limit += kPageSize),
+              ),
+            ],
           ],
         );
       },

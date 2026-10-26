@@ -16,6 +16,9 @@ class RefundCard extends StatelessWidget {
   /// True while a decision on this refund is being saved.
   final bool busy;
 
+  /// The decision being saved ('approved' or 'rejected'), to show its spinner.
+  final String? busyStatus;
+
   /// Called with 'approved' or 'rejected'.
   final void Function(String status) onDecide;
 
@@ -26,6 +29,7 @@ class RefundCard extends StatelessWidget {
     required this.readOnly,
     required this.busy,
     required this.onDecide,
+    this.busyStatus,
   });
 
   @override
@@ -89,8 +93,17 @@ class RefundCard extends StatelessWidget {
               spacing: 8,
               runSpacing: 8,
               children: [
-                ElevatedButton(onPressed: busy ? null : () => onDecide('approved'), child: const Text('Approve')),
-                OutlinedButton(onPressed: busy ? null : () => onDecide('rejected'), child: const Text('Reject')),
+                LoadingButton(
+                  label: 'Approve',
+                  loading: busy && busyStatus != 'rejected',
+                  onPressed: busy ? null : () => onDecide('approved'),
+                ),
+                LoadingButton(
+                  label: 'Reject',
+                  outlined: true,
+                  loading: busy && busyStatus == 'rejected',
+                  onPressed: busy ? null : () => onDecide('rejected'),
+                ),
               ],
             ),
           ],

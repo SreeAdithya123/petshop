@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -38,12 +40,8 @@ const _filters = <StatusFilter>[
 String _statusOf(DemoRequest demo) => demo.status;
 
 Future<WithCustomers<DemoRequest>> _fetchDemos(String shopId) async {
-  final data = await SupabaseService.client
-      .from('demo_requests')
-      .select()
-      .eq('shop_id', shopId)
-      .order('created_at', ascending: false);
-  final rows = data.map(DemoRequest.fromJson).toList();
+  final data = await fetchAllRows(() => SupabaseService.client.from('demo_requests').select().eq('shop_id', shopId));
+  final rows = data.map(DemoRequest.fromJson).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
   return attachCustomers<DemoRequest>(rows, (demo) => demo.customerId);
 }
 
@@ -78,6 +76,7 @@ class _DemosWorkspace extends ConsumerStatefulWidget {
 class _DemosWorkspaceState extends ConsumerState<_DemosWorkspace> {
   late final SellerQuery<WithCustomers<DemoRequest>> _query;
   String? _filter;
+  int _limit = kPageSize;
 
   @override
   void initState() {
@@ -121,6 +120,7 @@ class _DemosWorkspaceState extends ConsumerState<_DemosWorkspace> {
         // Open on "Pending" when there is something to answer, otherwise show everything.
         final active = _filter ?? (stats.pending > 0 ? 'pending' : 'all');
         final visible = applyStatusFilter(_filters, active, rows, _statusOf);
+        final shown = math.min(_limit, visible.length);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -139,7 +139,10 @@ class _DemosWorkspaceState extends ConsumerState<_DemosWorkspace> {
             FilterChipBar<String>(
               options: filterOptions(_filters, rows, _statusOf),
               selected: active,
-              onSelected: (value) => setState(() => _filter = value),
+              onSelected: (value) => setState(() {
+                _filter = value;
+                _limit = kPageSize;
+              }),
             ),
             const SizedBox(height: 16),
             if (data.customersError != null) ...[
@@ -155,8 +158,8 @@ class _DemosWorkspaceState extends ConsumerState<_DemosWorkspace> {
                       : 'No demo requests match this filter.',
                 ),
               )
-            else
-              for (final demo in visible)
+            else ...[
+              for (final demo in visible.take(shown))
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
                   child: DemoCard(
@@ -167,6 +170,12 @@ class _DemosWorkspaceState extends ConsumerState<_DemosWorkspace> {
                     onRespond: () => _respond(demo, data.customers[demo.customerId]),
                   ),
                 ),
+              LoadMoreButton(
+                shown: shown,
+                total: visible.length,
+                onPressed: () => setState(() => _limit += kPageSize),
+              ),
+            ],
           ],
         );
       },

@@ -4,14 +4,15 @@ import '../../data/service_categories.dart';
 import '../../models/service_models.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
+import '../../utils/video_room.dart';
 import '../ui_kit.dart';
 import 'seller_common.dart';
-
-const _linkError = 'Video links must start with https://';
+import 'video_link_field.dart';
 
 /// One customer booking of this shop's service, with Confirm / Mark
 /// completed / Cancel and the video-link field. Mirrors
-/// src/components/seller/BookingCard.jsx.
+/// src/components/seller/BookingCard.jsx. A video booking gets a free PETSTA
+/// video room by default, so confirming never needs a pasted link.
 class BookingCard extends StatefulWidget {
   final ServiceBooking booking;
   final CustomerInfo? customer;
@@ -35,17 +36,20 @@ class BookingCard extends StatefulWidget {
 class _BookingCardState extends State<BookingCard> {
   late final TextEditingController _link;
   bool _busy = false;
+  String? _busyAction;
   String? _error;
+  String? _linkError;
 
   ServiceBooking get _booking => widget.booking;
   bool get _isVideo => _booking.deliveryMode == 'video';
   bool get _isOpen => _booking.status == 'pending' || _booking.status == 'confirmed';
   bool get _canAct => !widget.readOnly && _isOpen;
+  String get _savedLink => (_booking.videoRoomUrl ?? '').trim();
 
   @override
   void initState() {
     super.initState();
-    _link = TextEditingController(text: _booking.videoRoomUrl ?? '');
+    _link = TextEditingController(text: _savedLink.isNotEmpty ? _savedLink : jitsiRoomUrl(_booking.id));
   }
 
   @override
@@ -54,10 +58,13 @@ class _BookingCardState extends State<BookingCard> {
     super.dispose();
   }
 
-  Future<void> _apply(Map<String, dynamic> patch, {String? fromStatus}) async {
+  Future<void> _apply(String action, Map<String, dynamic> patch, {String? fromStatus}) async {
+    if (_busy) return;
     setState(() {
       _busy = true;
+      _busyAction = action;
       _error = null;
+      _linkError = null;
     });
     final failure = await updateRow(
       'service_bookings',
@@ -68,31 +75,35 @@ class _BookingCardState extends State<BookingCard> {
     if (!mounted) return;
     setState(() {
       _busy = false;
+      _busyAction = null;
       _error = failure;
     });
-    if (failure == null) widget.onChanged();
+    // After a stale-status refusal the list reloads too, so the card shows the
+    // booking's real state and the right buttons.
+    if (failure == null || failure == kNothingChanged) widget.onChanged();
   }
 
   void _confirmBooking() {
-    final link = _link.text.trim();
-    // A video link is optional here, but if one is typed it has to be usable.
-    if (_isVideo && link.isNotEmpty && !isHttpsUrl(link)) {
-      setState(() => _error = _linkError);
-      return;
+    final patch = <String, dynamic>{'status': 'confirmed'};
+    if (_isVideo) {
+      // An empty field means the free PETSTA room; a typed link must be https.
+      final resolved = resolveVideoLink(_link.text, _booking.id);
+      if (resolved.error != null) {
+        setState(() => _linkError = resolved.error);
+        return;
+      }
+      patch['video_room_url'] = resolved.link;
     }
-    _apply({
-      'status': 'confirmed',
-      if (_isVideo && link.isNotEmpty) 'video_room_url': link,
-    }, fromStatus: 'pending');
+    _apply('confirm', patch, fromStatus: 'pending');
   }
 
   void _saveLink() {
-    final link = _link.text.trim();
-    if (!isHttpsUrl(link)) {
-      setState(() => _error = _linkError);
+    final resolved = resolveVideoLink(_link.text, _booking.id);
+    if (resolved.error != null) {
+      setState(() => _linkError = resolved.error);
       return;
     }
-    _apply({'video_room_url': link});
+    _apply('link', {'video_room_url': resolved.link}, fromStatus: _booking.status);
   }
 
   Future<void> _cancelBooking() async {
@@ -106,20 +117,20 @@ class _BookingCardState extends State<BookingCard> {
       destructive: true,
     );
     if (!confirmed || !mounted) return;
-    await _apply({'status': 'cancelled'});
+    await _apply('cancel', {'status': 'cancelled'}, fromStatus: _booking.status);
   }
 
   @override
   Widget build(BuildContext context) {
     final booking = _booking;
-    final savedLink = booking.videoRoomUrl ?? '';
-    final draft = _link.text.trim();
+    final savedLink = _savedLink;
     final subtitle = [
       if (booking.serviceCategory != null && booking.serviceCategory!.isNotEmpty)
         serviceCategoryLabel(booking.serviceCategory),
       'Booked ${formatOrderDate(booking.createdAt)}',
     ].join(' · ');
     final note = (booking.notes ?? '').trim();
+    final editingLink = _canAct && _isVideo;
 
     return CardBox(
       child: Column(
@@ -150,13 +161,12 @@ class _BookingCardState extends State<BookingCard> {
           SellerMetaRow('When', text: formatSlot(booking.bookingDate, booking.bookingTime)),
           SellerMetaRow('How', text: modeLabel(booking.deliveryMode)),
           SellerMetaRow('Price', text: formatPrice(booking.priceAtBooking)),
-          if (savedLink.isNotEmpty && !(_canAct && _isVideo))
-            SellerMetaRow('Video link', child: SellerLinkText(savedLink)),
+          if (savedLink.isNotEmpty && !editingLink) SellerMetaRow('Video link', child: SellerVideoLink(savedLink)),
           if (note.isNotEmpty) ...[
             const SizedBox(height: 10),
             SellerNoteBox(label: 'Customer note', text: note),
           ],
-          if (_canAct && _isVideo) ...[
+          if (editingLink) ...[
             const SizedBox(height: 12),
             Container(
               width: double.infinity,
@@ -165,29 +175,31 @@ class _BookingCardState extends State<BookingCard> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Video link', style: AppTheme.body(fontSize: 14, fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Paste a Google Meet/Zoom link; the customer sees it on their Services & Health pages.',
-                    style: AppTheme.body(fontSize: 12.5, color: AppColors.inkSoft),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
+                  VideoLinkField(
                     controller: _link,
+                    roomId: booking.id,
                     enabled: !_busy,
-                    keyboardType: TextInputType.url,
-                    autocorrect: false,
-                    onChanged: (_) => setState(() {}),
-                    decoration: const InputDecoration(hintText: 'https://meet.google.com/...'),
+                    errorText: _linkError,
+                    onChanged: () => setState(() => _linkError = null),
                   ),
-                  const SizedBox(height: 10),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: OutlinedButton(
-                      onPressed: (_busy || draft.isEmpty || draft == savedLink) ? null : _saveLink,
-                      child: const Text('Save link'),
+                  if (booking.status == 'confirmed') ...[
+                    const SizedBox(height: 10),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: LoadingButton(
+                        label: 'Save link',
+                        outlined: true,
+                        loading: _busyAction == 'link',
+                        onPressed: (_busy || _link.text.trim() == savedLink) ? null : _saveLink,
+                      ),
                     ),
-                  ),
+                  ] else ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'The link is saved when you confirm the booking.',
+                      style: AppTheme.body(fontSize: 12.5, color: AppColors.inkSoft),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -205,13 +217,23 @@ class _BookingCardState extends State<BookingCard> {
               runSpacing: 8,
               children: [
                 if (booking.status == 'pending')
-                  ElevatedButton(onPressed: _busy ? null : _confirmBooking, child: const Text('Confirm')),
-                if (booking.status == 'confirmed')
-                  ElevatedButton(
-                    onPressed: _busy ? null : () => _apply({'status': 'completed'}, fromStatus: 'confirmed'),
-                    child: const Text('Mark completed'),
+                  LoadingButton(
+                    label: 'Confirm',
+                    loading: _busyAction == 'confirm',
+                    onPressed: _busy ? null : _confirmBooking,
                   ),
-                OutlinedButton(onPressed: _busy ? null : _cancelBooking, child: const Text('Cancel booking')),
+                if (booking.status == 'confirmed')
+                  LoadingButton(
+                    label: 'Mark completed',
+                    loading: _busyAction == 'complete',
+                    onPressed: _busy ? null : () => _apply('complete', {'status': 'completed'}, fromStatus: 'confirmed'),
+                  ),
+                LoadingButton(
+                  label: 'Cancel booking',
+                  outlined: true,
+                  loading: _busyAction == 'cancel',
+                  onPressed: _busy ? null : _cancelBooking,
+                ),
               ],
             ),
           ],

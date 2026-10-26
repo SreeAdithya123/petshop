@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show PostgrestException;
 
 import '../../models/models.dart';
 import '../../services/supabase_service.dart';
 import '../../state/auth_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
+import '../pet_widgets.dart';
 import '../ui_kit.dart';
 
 /// Bottom-sheet version of src/components/pets/DemoRequestModal.jsx: a
@@ -41,7 +43,7 @@ class _DemoMode {
 }
 
 const _demoModes = [
-  _DemoMode('video', 'Video call', 'Meet the pet live, from wherever you are', Icons.videocam_outlined),
+  _DemoMode('video', 'Video call', 'The shop will send a video link once approved', Icons.videocam_outlined),
   _DemoMode(
     'in_person',
     'Visit the shop in person',
@@ -160,9 +162,12 @@ class _DemoRequestFormState extends ConsumerState<_DemoRequestForm> {
       });
     } catch (error) {
       if (!mounted) return;
+      final duplicate = error is PostgrestException && error.code == '23505';
       setState(() {
         _submitting = false;
-        _submitError = errorText(error);
+        _submitError = duplicate
+            ? 'You already have a demo request for this pet. Track it under My account → Demo requests.'
+            : commerceErrorText(error);
       });
     }
   }
@@ -202,9 +207,11 @@ class _DemoRequestFormState extends ConsumerState<_DemoRequestForm> {
   }
 
   Widget _buildSuccess(_RequestedDemo requested) {
+    final isVideo = requested.modeLabel == _demoModes.first.label;
     return SuccessPanel(
       title: 'Demo requested',
-      message: 'The shop will confirm — track it under My account → Demo requests.\n\n'
+      message: 'The shop will confirm — track it under My account → Demo requests.'
+          '${isVideo ? ' Once approved, the shop will send you a video link.' : ''}\n\n'
           '${widget.pet.displayName} · ${requested.modeLabel} · ${formatDate(requested.date)}, ${requested.time}',
       actions: [
         ElevatedButton(
@@ -238,15 +245,21 @@ class _DemoRequestFormState extends ConsumerState<_DemoRequestForm> {
             ),
           const SizedBox(height: 8),
           const _FieldLabel('Preferred date'),
-          InkWell(
+          Semantics(
+            button: true,
+            label: 'Preferred date, ${formatDate(_date)}.${_dateError == null ? '' : ' $_dateError.'} Double tap to change.',
+            excludeSemantics: true,
             onTap: _submitting ? null : _pickDate,
-            borderRadius: BorderRadius.circular(12),
-            child: InputDecorator(
-              decoration: InputDecoration(
-                errorText: _dateError,
-                suffixIcon: const Icon(Icons.calendar_today_outlined, size: 18),
+            child: InkWell(
+              onTap: _submitting ? null : _pickDate,
+              borderRadius: BorderRadius.circular(12),
+              child: InputDecorator(
+                decoration: InputDecoration(
+                  errorText: _dateError,
+                  suffixIcon: const Icon(Icons.calendar_today_outlined, size: 18),
+                ),
+                child: Text(formatDate(_date), style: AppTheme.body()),
               ),
-              child: Text(formatDate(_date), style: AppTheme.body()),
             ),
           ),
           const SizedBox(height: 4),

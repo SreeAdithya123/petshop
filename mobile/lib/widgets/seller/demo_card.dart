@@ -67,7 +67,7 @@ class DemoCard extends StatelessWidget {
           SellerMetaRow('How', text: modeLabel(demo.mode)),
           if (hasConfirmed)
             SellerMetaRow('Confirmed for', text: formatSlot(demo.confirmedDate, confirmedTime)),
-          if (meetLink.isNotEmpty) SellerMetaRow('Video link', child: SellerLinkText(meetLink)),
+          if (meetLink.isNotEmpty) SellerMetaRow('Video link', child: SellerVideoLink(meetLink)),
           if (message.isNotEmpty) ...[
             const SizedBox(height: 10),
             SellerNoteBox(label: 'Customer message', text: message),

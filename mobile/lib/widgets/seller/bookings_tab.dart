@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../models/service_models.dart';
@@ -30,6 +32,7 @@ class BookingsTab extends StatefulWidget {
 
 class _BookingsTabState extends State<BookingsTab> {
   String? _filter;
+  int _limit = kPageSize;
 
   @override
   Widget build(BuildContext context) {
@@ -42,6 +45,7 @@ class _BookingsTabState extends State<BookingsTab> {
         final pendingCount = rows.where((row) => row.status == 'pending').length;
         final active = _filter ?? (pendingCount > 0 ? 'pending' : 'all');
         final visible = applyStatusFilter(_bookingFilters, active, rows, _statusOf);
+        final shown = math.min(_limit, visible.length);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -49,7 +53,10 @@ class _BookingsTabState extends State<BookingsTab> {
             FilterChipBar<String>(
               options: filterOptions(_bookingFilters, rows, _statusOf),
               selected: active,
-              onSelected: (value) => setState(() => _filter = value),
+              onSelected: (value) => setState(() {
+                _filter = value;
+                _limit = kPageSize;
+              }),
             ),
             const SizedBox(height: 16),
             if (data.customersError != null) ...[
@@ -65,8 +72,8 @@ class _BookingsTabState extends State<BookingsTab> {
                       : 'No bookings match this filter.',
                 ),
               )
-            else
-              for (final booking in visible)
+            else ...[
+              for (final booking in visible.take(shown))
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
                   child: BookingCard(
@@ -77,6 +84,12 @@ class _BookingsTabState extends State<BookingsTab> {
                     onChanged: widget.query.reload,
                   ),
                 ),
+              LoadMoreButton(
+                shown: shown,
+                total: visible.length,
+                onPressed: () => setState(() => _limit += kPageSize),
+              ),
+            ],
           ],
         );
       },

@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/app_error.dart';
+import '../../core/async_utils.dart';
 import '../../data/service_categories.dart';
 import '../../services/supabase_service.dart';
 import '../../state/auth_provider.dart';
@@ -9,6 +11,9 @@ import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
 import '../ui_kit.dart';
 import 'service_support.dart';
+
+/// Largest budget the form accepts (keeps the number inside the column's range).
+const double _maxBudget = 9999999;
 
 /// Opens the "Request a custom service" bottom sheet (the Flutter counterpart
 /// of CustomServiceModal.jsx): ask nearby approved shops for a quote on
@@ -60,14 +65,15 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
   }
 
   Future<void> _pickDate() async {
-    final today = todayDate();
-    final current = _preferredDate;
-    final initial = current != null && !current.isBefore(today) ? current : today;
+    // Recomputed on every open, so a sheet left open past midnight stays valid.
+    final first = todayDate();
+    final last = addDays(first, 365);
     final picked = await showDatePicker(
       context: context,
-      initialDate: initial,
-      firstDate: today,
-      lastDate: today.add(const Duration(days: 365)),
+      initialDate: clampDate(_preferredDate ?? first, first, last),
+      firstDate: first,
+      lastDate: last,
+      helpText: 'Preferred date',
     );
     if (picked == null || !mounted) return;
     setState(() {
@@ -77,6 +83,7 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
   }
 
   Future<void> _submit(String userId) async {
+    if (_submitting) return;
     final title = _titleController.text.trim();
     final description = _descriptionController.text.trim();
     final petName = _petNameController.text.trim();
@@ -89,11 +96,14 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
       budget = double.tryParse(budgetText);
       if (budget == null || budget.isNaN || budget.isInfinite || budget < 0) {
         budgetError = 'Enter an amount of 0 or more.';
+      } else if (budget > _maxBudget) {
+        budgetError = 'Enter an amount up to ${formatPrice(_maxBudget)}.';
       }
     }
     final titleError = title.isEmpty ? 'Give your request a short title.' : null;
     final descriptionError = description.isEmpty ? 'Describe what you need.' : null;
-    final dateError = preferredDate != null && preferredDate.isBefore(todayDate()) ? 'Pick today or a later date.' : null;
+    final dateError =
+        preferredDate != null && preferredDate.isBefore(todayDate()) ? 'Pick today or a later date.' : null;
 
     setState(() {
       _formError = null;
@@ -107,19 +117,22 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
     setState(() => _submitting = true);
     String? failure;
     try {
-      await SupabaseService.client.from('custom_service_requests').insert({
-        'customer_id': userId,
-        'title': title,
-        'description': description,
-        'category': _category,
-        'pet_name': petName.isEmpty ? null : petName,
-        'pet_species': _petSpecies,
-        'preferred_date': preferredDate == null ? null : toDateParam(preferredDate),
-        'budget': budget,
-      });
+      await withTimeout(
+        SupabaseService.client.from('custom_service_requests').insert({
+          'customer_id': userId,
+          'title': title,
+          'description': description,
+          'category': _category,
+          'pet_name': petName.isEmpty ? null : petName,
+          'pet_species': _petSpecies,
+          'preferred_date': preferredDate == null ? null : toDateParam(preferredDate),
+          'budget': budget,
+        }),
+      );
     } catch (error) {
-      final message = errorText(error);
-      failure = message.isEmpty ? "Couldn't send your request. Try again." : message;
+      failure = isTimeoutError(error)
+          ? "$kTimeoutError Check My requests first, in case it was sent."
+          : errorText(error);
     }
 
     if (failure == null) widget.onSent?.call();
@@ -131,6 +144,7 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
       if (failureText == null) {
         _sent = true;
       } else {
+        // Everything typed so far stays in place so the person can just retry.
         _formError = failureText;
       }
     });
@@ -140,6 +154,15 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
   Widget build(BuildContext context) {
     final access = ServiceAccess.from(ref.watch(authControllerProvider));
 
+    // Closing the sheet mid-request would hide the outcome and invite a second
+    // request, so back / drag / the close button wait until it has finished.
+    return PopScope(
+      canPop: !_submitting,
+      child: _buildBody(access),
+    );
+  }
+
+  Widget _buildBody(ServiceAccess access) {
     if (_sent) return _buildSuccess();
     final userId = access.userId;
     if (!access.canBook || userId == null) {
@@ -149,17 +172,30 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
   }
 
   Widget _buildSuccess() {
-    return SuccessPanel(
-      title: "Request sent to nearby approved shops — they'll reply with a quote",
-      message: 'You can accept or decline any quote under My bookings & requests.',
-      actions: [
-        ElevatedButton(
-          onPressed: () => Navigator.of(context).pop(true),
-          child: const Text('View my requests'),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SuccessPanel(
+          title: "Request sent to nearby approved shops — they'll reply with a quote",
+          message: 'You can accept or decline any quote under My bookings & requests.',
+          actions: [
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('View my requests'),
+            ),
+            OutlinedButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Done'),
+            ),
+          ],
         ),
-        OutlinedButton(
-          onPressed: () => Navigator.of(context).pop(false),
-          child: const Text('Done'),
+        const SizedBox(height: 16),
+        const NextStepsList(
+          steps: [
+            'Approved shops near you see your request and reply with a price.',
+            'Quotes appear under My bookings & requests. Nothing is booked until you accept one.',
+            'You can decline a quote or cancel the request at any time.',
+          ],
         ),
       ],
     );
@@ -174,6 +210,7 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
         TextField(
           controller: _titleController,
           maxLength: 120,
+          enabled: !_submitting,
           textCapitalization: TextCapitalization.sentences,
           decoration: InputDecoration(
             hintText: 'e.g. Home visit grooming for a senior dog',
@@ -188,6 +225,7 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
           maxLength: 1000,
           minLines: 3,
           maxLines: 6,
+          enabled: !_submitting,
           textCapitalization: TextCapitalization.sentences,
           decoration: InputDecoration(errorText: _descriptionError, counterText: ''),
         ),
@@ -201,13 +239,14 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
             for (final category in serviceCategories)
               DropdownMenuItem<String?>(value: category.key, child: Text(category.label)),
           ],
-          onChanged: (value) => setState(() => _category = value),
+          onChanged: _submitting ? null : (value) => setState(() => _category = value),
         ),
         const SizedBox(height: 16),
         const SheetFieldLabel("Pet's name", optional: true),
         TextField(
           controller: _petNameController,
           maxLength: 60,
+          enabled: !_submitting,
           textCapitalization: TextCapitalization.words,
           decoration: const InputDecoration(counterText: ''),
         ),
@@ -220,30 +259,38 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
             const DropdownMenuItem<String?>(value: null, child: Text('Select')),
             for (final species in petSpeciesOptions) DropdownMenuItem<String?>(value: species, child: Text(species)),
           ],
-          onChanged: (value) => setState(() => _petSpecies = value),
+          onChanged: _submitting ? null : (value) => setState(() => _petSpecies = value),
         ),
         const SizedBox(height: 16),
         const SheetFieldLabel('Preferred date', optional: true),
-        InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: _pickDate,
-          child: InputDecorator(
-            decoration: InputDecoration(
-              errorText: _dateError,
-              suffixIcon: preferredDate == null
-                  ? const Icon(Icons.calendar_today_outlined, size: 20)
-                  : IconButton(
-                      tooltip: 'Clear date',
-                      icon: const Icon(Icons.close, size: 20),
-                      onPressed: () => setState(() {
-                        _preferredDate = null;
-                        _dateError = null;
-                      }),
-                    ),
-            ),
-            child: Text(
-              preferredDate == null ? 'Any day' : formatDate(preferredDate),
-              style: AppTheme.body(color: preferredDate == null ? AppColors.inkSoft : AppColors.ink),
+        Semantics(
+          button: true,
+          label: preferredDate == null ? 'Preferred date, any day' : 'Preferred date, ${formatDate(preferredDate)}',
+          excludeSemantics: true,
+          onTap: _submitting ? null : _pickDate,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: _submitting ? null : _pickDate,
+            child: InputDecorator(
+              decoration: InputDecoration(
+                errorText: _dateError,
+                suffixIcon: preferredDate == null
+                    ? const Icon(Icons.calendar_today_outlined, size: 20)
+                    : IconButton(
+                        tooltip: 'Clear date',
+                        icon: const Icon(Icons.close, size: 20),
+                        onPressed: _submitting
+                            ? null
+                            : () => setState(() {
+                                  _preferredDate = null;
+                                  _dateError = null;
+                                }),
+                      ),
+              ),
+              child: Text(
+                preferredDate == null ? 'Any day' : formatDate(preferredDate),
+                style: AppTheme.body(color: preferredDate == null ? AppColors.inkSoft : AppColors.ink),
+              ),
             ),
           ),
         ),
@@ -251,23 +298,29 @@ class _CustomServiceFormState extends ConsumerState<CustomServiceForm> {
         const SheetFieldLabel('Budget (₹)', optional: true),
         TextField(
           controller: _budgetController,
+          enabled: !_submitting,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
           decoration: InputDecoration(prefixText: '₹ ', errorText: _budgetError),
         ),
         if (_formError != null) ...[
           const SizedBox(height: 12),
-          Text(_formError!, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
+          Semantics(
+            liveRegion: true,
+            child: Text(_formError!, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
+          ),
         ],
         const SizedBox(height: 20),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
+        Wrap(
+          alignment: WrapAlignment.end,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 8,
+          runSpacing: 8,
           children: [
             TextButton(
               onPressed: _submitting ? null : () => Navigator.of(context).pop(),
               child: const Text('Cancel'),
             ),
-            const SizedBox(width: 8),
             LoadingButton(
               label: 'Send request',
               loading: _submitting,

@@ -1,7 +1,12 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../config/env.dart';
 import '../state/auth_provider.dart';
+import '../screens/auth/forgot_password_screen.dart';
+import '../screens/auth/reset_password_screen.dart';
+import '../screens/legal/privacy_policy_screen.dart';
+import '../screens/legal/terms_screen.dart';
 import '../screens/account/account_addresses_screen.dart';
 import '../screens/account/account_demos_screen.dart';
 import '../screens/account/account_orders_screen.dart';
@@ -70,16 +75,30 @@ const _adminPaths = [
   '/admin/contracts',
 ];
 
+const _resetPasswordPath = '/reset-password';
+
 /// Mirrors src/App.jsx's route table + src/components/auth/ProtectedRoute.jsx's
 /// redirect behaviour: signed-out visitor hitting a /seller or /admin route
 /// bounces to /login; wrong-role visitor bounces to their own role home.
+///
+/// The auth controller is read (not watched) on purpose: watching it would
+/// rebuild the whole router -- and reset navigation to '/' -- on every auth
+/// change. [GoRouter.refreshListenable] re-runs the redirect instead.
 GoRouter buildRouter(Ref ref) {
-  return GoRouter(
+  final authController = ref.read(authControllerProvider);
+  final router = GoRouter(
     initialLocation: '/',
-    refreshListenable: ref.watch(authControllerProvider),
+    refreshListenable: authController,
     redirect: (context, state) {
       final auth = ref.read(authControllerProvider);
       final path = state.matchedLocation;
+
+      // The password-reset email opens the app through the deep link
+      // io.supabase.petsta://reset-callback/?code=...; supabase_flutter
+      // exchanges the code, then the reset screen takes over.
+      if (state.uri.host == AppEnv.authRedirectHost) return _resetPasswordPath;
+      if (auth.passwordRecovery && path != _resetPasswordPath) return _resetPasswordPath;
+
       final needsSeller = _sellerPaths.any((p) => path.startsWith(p));
       final needsAdmin = _adminPaths.any((p) => path.startsWith(p));
       if (!needsSeller && !needsAdmin) return null;
@@ -139,6 +158,14 @@ GoRouter buildRouter(Ref ref) {
 
       GoRoute(path: '/signup', builder: (context, state) => const SignUpScreen()),
       GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
+      GoRoute(path: '/forgot-password', builder: (context, state) => const ForgotPasswordScreen()),
+      GoRoute(path: _resetPasswordPath, builder: (context, state) => const ResetPasswordScreen()),
+
+      // Legal pages (linked from sign-up, the drawer and My account).
+      GoRoute(path: '/legal/privacy', builder: (context, state) => const PrivacyPolicyScreen()),
+      GoRoute(path: '/legal/terms', builder: (context, state) => const TermsScreen()),
+      GoRoute(path: '/privacy', redirect: (context, state) => '/legal/privacy'),
+      GoRoute(path: '/terms', redirect: (context, state) => '/legal/terms'),
 
       GoRoute(path: '/seller/dashboard', builder: (context, state) => const SellerDashboardScreen()),
       GoRoute(path: '/seller/analytics', builder: (context, state) => const SellerAnalyticsScreen()),
@@ -162,6 +189,8 @@ GoRouter buildRouter(Ref ref) {
     ],
     errorBuilder: (context, state) => const NotFoundScreen(),
   );
+  ref.onDispose(router.dispose);
+  return router;
 }
 
 final routerProvider = Provider<GoRouter>((ref) => buildRouter(ref));

@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../../core/async_utils.dart';
 import '../../models/service_models.dart';
 import '../../services/supabase_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
-import '../shared_widgets.dart';
+import '../skeletons.dart';
 import '../ui_kit.dart';
 import 'service_support.dart';
 
@@ -42,7 +43,7 @@ class ServiceBookingsController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  /// [silent] keeps the current rows on screen instead of flashing a spinner.
+  /// [silent] keeps the current rows on screen instead of flashing a skeleton.
   Future<void> load({bool silent = false}) async {
     final generation = ++_generation;
     if (!silent || bookings.isEmpty) loading = true;
@@ -52,7 +53,7 @@ class ServiceBookingsController extends ChangeNotifier {
       var query = SupabaseService.client.from('service_bookings').select(_bookingColumns).eq('customer_id', userId);
       final categoryFilter = category;
       if (categoryFilter != null) query = query.eq('service_category', categoryFilter);
-      final rows = await query.order('created_at', ascending: false);
+      final rows = await withTimeout(query.order('created_at', ascending: false));
       if (_disposed || generation != _generation) return;
       bookings = rows.map(ServiceBooking.fromJson).toList();
     } catch (e) {
@@ -64,18 +65,22 @@ class ServiceBookingsController extends ChangeNotifier {
   }
 
   Future<void> cancel(String id) async {
+    // One change at a time: ignore a second tap while a request is in flight.
+    if (busyId != null) return;
     busyId = id;
     actionError = null;
     _notify();
     try {
       // .select() so a row filtered out by RLS / the status guard is noticed.
-      final rows = await SupabaseService.client
-          .from('service_bookings')
-          .update({'status': 'cancelled'})
-          .eq('id', id)
-          .inFilter('status', ['pending', 'confirmed'])
-          .select('id');
-      if (rows.isEmpty) actionError = "That didn't go through — its status may have changed.";
+      final rows = await withTimeout(
+        SupabaseService.client
+            .from('service_bookings')
+            .update({'status': 'cancelled'})
+            .eq('id', id)
+            .inFilter('status', ['pending', 'confirmed'])
+            .select('id'),
+      );
+      if (rows.isEmpty) actionError = kStatusChangedMessage;
     } catch (e) {
       actionError = errorText(e);
     }
@@ -99,7 +104,7 @@ class BookingsList extends StatelessWidget {
       builder: (context, _) {
         final bookings = controller.bookings;
         if (controller.loading && bookings.isEmpty) {
-          return const LoadingView();
+          return const ListSkeleton(count: 2, itemHeight: 120);
         }
         final error = controller.error;
         final actionError = controller.actionError;
@@ -117,13 +122,18 @@ class BookingsList extends StatelessWidget {
               const SizedBox(height: 12),
             ],
             if (actionError != null) ...[
-              Text(actionError, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
+              Semantics(
+                liveRegion: true,
+                child: Text(actionError, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
+              ),
               const SizedBox(height: 12),
             ],
             for (final booking in bookings) ...[
               _BookingCard(
                 booking: booking,
                 busy: controller.busyId == booking.id,
+                // Another cancel is in flight: keep every cancel button idle.
+                locked: controller.busyId != null,
                 onCancel: () => _confirmCancel(context, booking),
               ),
               const SizedBox(height: 12),
@@ -150,19 +160,28 @@ class BookingsList extends StatelessWidget {
 class _BookingCard extends StatelessWidget {
   final ServiceBooking booking;
   final bool busy;
+  final bool locked;
   final VoidCallback onCancel;
 
-  const _BookingCard({required this.booking, required this.busy, required this.onCancel});
+  const _BookingCard({required this.booking, required this.busy, required this.locked, required this.onCancel});
 
   @override
   Widget build(BuildContext context) {
     final mode = deliveryModeFor(booking.deliveryMode);
-    final canCancel = booking.status == 'pending' || booking.status == 'confirmed';
-    final videoUri = booking.status == 'confirmed' ? safeExternalUri(booking.videoRoomUrl) : null;
+    final confirmed = booking.status == 'confirmed';
+    final isVideo = booking.deliveryMode == 'video';
+    final canCancel = booking.status == 'pending' || confirmed;
+    // The join button needs both: the clinic has confirmed AND it saved a link
+    // that is a plain http(s) URL (isSafeWebLink inside safeExternalUri).
+    final videoUri = confirmed ? safeExternalUri(booking.videoRoomUrl) : null;
+    final waitingForLink = confirmed && isVideo && videoUri == null;
+    final awaitingConfirmation = booking.status == 'pending' && isVideo;
+    final showExpectation = confirmed && (isVideo || videoUri != null);
     final shopName = booking.shopName?.trim() ?? '';
     final notes = booking.notes?.trim() ?? '';
-    final waitingForLink = booking.status == 'confirmed' && booking.deliveryMode == 'video' && videoUri == null;
     final time = formatClock(booking.bookingTime);
+    final when = time.isEmpty ? formatDate(booking.bookingDate) : '${formatDate(booking.bookingDate)} at $time';
+    final title = (booking.serviceName ?? '').isEmpty ? 'Service' : booking.serviceName!;
 
     return CardBox(
       child: Column(
@@ -172,13 +191,10 @@ class _BookingCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
-                child: Text(
-                  (booking.serviceName ?? '').isEmpty ? 'Service' : booking.serviceName!,
-                  style: AppTheme.body(fontSize: 15.5, fontWeight: FontWeight.w600),
-                ),
+                child: Text(title, style: AppTheme.body(fontSize: 15.5, fontWeight: FontWeight.w600)),
               ),
               const SizedBox(width: 8),
-              StatusBadge(status: booking.status),
+              Flexible(child: StatusBadge(status: booking.status)),
             ],
           ),
           if (shopName.isNotEmpty) ...[
@@ -189,11 +205,9 @@ class _BookingCard extends StatelessWidget {
           Wrap(
             spacing: 16,
             runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              _MetaItem(
-                icon: Icons.calendar_today_outlined,
-                text: time.isEmpty ? formatDate(booking.bookingDate) : '${formatDate(booking.bookingDate)} at $time',
-              ),
+              _MetaItem(icon: Icons.calendar_today_outlined, text: when),
               _MetaItem(icon: mode.icon, text: mode.label),
               if (booking.priceAtBooking > 0)
                 Text(
@@ -206,16 +220,45 @@ class _BookingCard extends StatelessWidget {
             const SizedBox(height: 10),
             Text(
               notes,
-              maxLines: 2,
+              maxLines: 3,
               overflow: TextOverflow.ellipsis,
               style: AppTheme.body(fontSize: 13.5, color: AppColors.inkSoft),
             ),
           ],
+          if (awaitingConfirmation) ...[
+            const SizedBox(height: 10),
+            Text(videoLinkAfterConfirmText, style: AppTheme.body(fontSize: 13.5, color: AppColors.inkSoft)),
+          ],
           if (waitingForLink) ...[
             const SizedBox(height: 10),
-            Text(
-              "The clinic hasn't added a video link yet — check back soon.",
-              style: AppTheme.body(fontSize: 13.5, color: AppColors.inkSoft),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(top: 2),
+                  child: Icon(Icons.hourglass_empty, size: 16, color: AppColors.inkSoft),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(videoLinkSoonText, style: AppTheme.body(fontSize: 13.5, color: AppColors.inkSoft)),
+                ),
+              ],
+            ),
+          ],
+          if (showExpectation) ...[
+            const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(top: 2),
+                  child: Icon(Icons.info_outline, size: 16, color: AppColors.inkSoft),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(videoExpectationText, style: AppTheme.body(fontSize: 12.5, color: AppColors.inkSoft)),
+                ),
+              ],
             ),
           ],
           if (videoUri != null || canCancel) ...[
@@ -231,11 +274,17 @@ class _BookingCard extends StatelessWidget {
                     label: const Text('Join video consult'),
                   ),
                 if (canCancel)
-                  OutlinedButton(
-                    onPressed: busy ? null : onCancel,
-                    child: busy
-                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Text('Cancel'),
+                  Semantics(
+                    button: true,
+                    label: 'Cancel booking for $title',
+                    excludeSemantics: true,
+                    onTap: busy || locked ? null : onCancel,
+                    child: OutlinedButton(
+                      onPressed: busy || locked ? null : onCancel,
+                      child: busy
+                          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Text('Cancel'),
+                    ),
                   ),
               ],
             ),

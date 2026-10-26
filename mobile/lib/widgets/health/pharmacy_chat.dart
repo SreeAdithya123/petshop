@@ -2,22 +2,48 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/async_utils.dart';
+import '../../data/columns.dart';
 import '../../services/supabase_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
+import '../skeletons.dart';
 import '../ui_kit.dart';
 import 'pharmacy_intents.dart';
 
-// Customer-facing: no cost_price, and the shop embed is name-only.
-const _productColumns =
-    'id, shop_id, name, description, price, stock_quantity, photo_urls, requires_prescription, category, shops(name)';
+// Customer-facing: the public product columns plus a name-only shop embed. No
+// cost_price, and never a shop address or phone number.
+const _suggestionColumns = '$productPublicColumns, shops(name)';
 const _maxMessageLength = 300;
 const _amber = Color(0xFFB45309);
+
+enum _ReplyKind { greeting, emergency, advice, fallback }
+
+/// What the assistant answers with. [intent] is the topic for advice and the
+/// urgent answer for an emergency.
+class _BotReply {
+  final _ReplyKind kind;
+  final PharmacyIntent? intent;
+
+  const _BotReply(this.kind, [this.intent]);
+}
+
+/// The only glue between a customer message and pharmacy_intents.dart. An
+/// emergency never reaches the product search: [_BotBubble] builds no
+/// [_ProductSuggestions] for it.
+_BotReply _replyFor(String text) {
+  final match = matchIntent(text);
+  if (match.isEmergency) return _BotReply(_ReplyKind.emergency, match.intent ?? emergencyIntent);
+  final intent = match.intent;
+  if (intent != null) return _BotReply(_ReplyKind.advice, intent);
+  if (isGreeting(text)) return const _BotReply(_ReplyKind.greeting);
+  return const _BotReply(_ReplyKind.fallback);
+}
 
 class _ChatMessage {
   final int id;
   final String? text; // non-null for a customer message
-  final PharmacyReply? reply; // non-null for an assistant message
+  final _BotReply? reply; // non-null for an assistant message
 
   const _ChatMessage({required this.id, this.text, this.reply});
 }
@@ -78,21 +104,20 @@ class _PharmacyChatState extends State<PharmacyChat> {
 
   List<_ChatMessage> _freshConversation() {
     return [
-      _ChatMessage(
-        id: _nextId++,
-        reply: const PharmacyReply(kind: PharmacyReplyKind.greeting, message: pharmacyIntroMessage),
-      ),
+      _ChatMessage(id: _nextId++, reply: const _BotReply(_ReplyKind.greeting)),
     ];
   }
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
-      _scroll.animateTo(
-        _scroll.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 250),
-        curve: Curves.easeOut,
-      );
+      final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+      final target = _scroll.position.maxScrollExtent;
+      if (reduceMotion) {
+        _scroll.jumpTo(target);
+      } else {
+        _scroll.animateTo(target, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+      }
     });
   }
 
@@ -100,12 +125,11 @@ class _PharmacyChatState extends State<PharmacyChat> {
     var trimmed = text.trim();
     if (trimmed.length > _maxMessageLength) trimmed = trimmed.substring(0, _maxMessageLength).trim();
     if (trimmed.isEmpty) return;
-    final message = trimmed;
-    final reply = getReply(message);
+    final reply = _replyFor(trimmed);
     setState(() {
       _messages = [
         ..._messages,
-        _ChatMessage(id: _nextId++, text: message),
+        _ChatMessage(id: _nextId++, text: trimmed),
         _ChatMessage(id: _nextId++, reply: reply),
       ];
     });
@@ -133,6 +157,7 @@ class _PharmacyChatState extends State<PharmacyChat> {
             color: AppColors.paper,
             child: ListView.builder(
               controller: _scroll,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: const EdgeInsets.all(16),
               itemCount: itemCount,
               itemBuilder: (context, index) {
@@ -167,23 +192,28 @@ class _PharmacyChatState extends State<PharmacyChat> {
       padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
       child: Row(
         children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: AppColors.primary.withValues(alpha: 0.1),
-              shape: BoxShape.circle,
+          ExcludeSemantics(
+            child: Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: AppColors.primary.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.smart_toy_outlined, size: 20, color: AppColors.primary),
             ),
-            child: const Icon(Icons.smart_toy_outlined, size: 20, color: AppColors.primary),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Pharmacy assistant (automated)',
-                  style: AppTheme.body(fontSize: 14.5, fontWeight: FontWeight.w600),
+                Semantics(
+                  header: true,
+                  child: Text(
+                    'Pharmacy assistant (automated)',
+                    style: AppTheme.body(fontSize: 14.5, fontWeight: FontWeight.w600),
+                  ),
                 ),
                 Text(
                   'Rule-based tips. Not a vet or a pharmacist.',
@@ -197,6 +227,7 @@ class _PharmacyChatState extends State<PharmacyChat> {
               onPressed: _newChat,
               style: TextButton.styleFrom(
                 foregroundColor: AppColors.primary,
+                minimumSize: const Size(64, 48),
                 textStyle: AppTheme.body(fontSize: 12.5, fontWeight: FontWeight.w600),
               ),
               child: const Text('New chat'),
@@ -239,17 +270,21 @@ class _PharmacyChatState extends State<PharmacyChat> {
           Row(
             children: [
               Expanded(
-                child: TextField(
-                  controller: _controller,
-                  focusNode: _inputFocus,
-                  maxLength: _maxMessageLength,
-                  textInputAction: TextInputAction.send,
-                  textCapitalization: TextCapitalization.sentences,
-                  onSubmitted: _send,
-                  decoration: const InputDecoration(
-                    hintText: 'e.g. my cat keeps scratching her ear',
-                    counterText: '',
-                    isDense: true,
+                child: Semantics(
+                  textField: true,
+                  label: 'Message for the pharmacy assistant',
+                  child: TextField(
+                    controller: _controller,
+                    focusNode: _inputFocus,
+                    maxLength: _maxMessageLength,
+                    textInputAction: TextInputAction.send,
+                    textCapitalization: TextCapitalization.sentences,
+                    onSubmitted: _send,
+                    decoration: const InputDecoration(
+                      hintText: 'e.g. my cat keeps scratching her ear',
+                      counterText: '',
+                      isDense: true,
+                    ),
                   ),
                 ),
               ),
@@ -282,18 +317,22 @@ class _UserBubble extends StatelessWidget {
       alignment: Alignment.centerRight,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * 0.8),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: const BoxDecoration(
-            color: AppColors.primary,
-            borderRadius: BorderRadius.only(
-              topLeft: Radius.circular(16),
-              topRight: Radius.circular(16),
-              bottomLeft: Radius.circular(16),
-              bottomRight: Radius.circular(4),
+        child: Semantics(
+          label: 'You said: $text',
+          excludeSemantics: true,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: const BoxDecoration(
+              color: AppColors.primary,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(16),
+                topRight: Radius.circular(16),
+                bottomLeft: Radius.circular(16),
+                bottomRight: Radius.circular(4),
+              ),
             ),
+            child: Text(text, style: AppTheme.body(fontSize: 14, color: Colors.white)),
           ),
-          child: Text(text, style: AppTheme.body(fontSize: 14, color: Colors.white)),
         ),
       ),
     );
@@ -301,7 +340,7 @@ class _UserBubble extends StatelessWidget {
 }
 
 class _BotBubble extends StatelessWidget {
-  final PharmacyReply reply;
+  final _BotReply reply;
   final ValueChanged<String> onSend;
   final VoidCallback onBookVet;
   final VoidCallback? onSettled;
@@ -314,27 +353,32 @@ class _BotBubble extends StatelessWidget {
       alignment: Alignment.centerLeft,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * 0.92),
-        child: Container(
-          padding: const EdgeInsets.all(14),
-          decoration: const BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.only(
-              topLeft: Radius.circular(16),
-              topRight: Radius.circular(16),
-              bottomLeft: Radius.circular(4),
-              bottomRight: Radius.circular(16),
+        child: Semantics(
+          container: true,
+          // An urgent answer is announced as soon as it appears.
+          liveRegion: reply.kind == _ReplyKind.emergency,
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: const BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(16),
+                topRight: Radius.circular(16),
+                bottomLeft: Radius.circular(4),
+                bottomRight: Radius.circular(16),
+              ),
+              border: Border.fromBorderSide(BorderSide(color: AppColors.border)),
             ),
-            border: Border.fromBorderSide(BorderSide(color: AppColors.border)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildBody(),
-              const SizedBox(height: 10),
-              const Divider(height: 1),
-              const SizedBox(height: 8),
-              Text(pharmacyDisclaimer, style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
-            ],
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildBody(),
+                const SizedBox(height: 10),
+                const Divider(height: 1),
+                const SizedBox(height: 8),
+                Text(pharmacyDisclaimer, style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
+              ],
+            ),
           ),
         ),
       ),
@@ -342,19 +386,20 @@ class _BotBubble extends StatelessWidget {
   }
 
   Widget _buildBody() {
+    final intent = reply.intent;
     switch (reply.kind) {
-      case PharmacyReplyKind.emergency:
-        return _buildEmergency();
-      case PharmacyReplyKind.advice:
-        return _buildAdvice();
-      case PharmacyReplyKind.greeting:
-        return Text(reply.message, style: AppTheme.body(fontSize: 14));
-      case PharmacyReplyKind.fallback:
+      case _ReplyKind.emergency:
+        return _buildEmergency(intent ?? emergencyIntent);
+      case _ReplyKind.advice:
+        return intent == null ? _buildFallback() : _buildAdvice(intent);
+      case _ReplyKind.greeting:
+        return Text(pharmacyIntroMessage, style: AppTheme.body(fontSize: 14));
+      case _ReplyKind.fallback:
         return _buildFallback();
     }
   }
 
-  Widget _buildEmergency() {
+  Widget _buildEmergency(PharmacyIntent intent) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -380,24 +425,40 @@ class _BotBubble extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 6),
-              Text(reply.message, style: AppTheme.body(fontSize: 14, fontWeight: FontWeight.w600)),
+              Text(intent.message, style: AppTheme.body(fontSize: 14, fontWeight: FontWeight.w600)),
               const SizedBox(height: 8),
-              _BulletList(items: reply.steps),
+              _BulletList(items: intent.steps),
             ],
           ),
         ),
+        // No product suggestions here, on purpose: an emergency is a vet visit.
         _VetLink(label: 'Book a video consult for follow-up advice', onPressed: onBookVet),
       ],
     );
   }
 
-  Widget _buildAdvice() {
+  Widget _buildAdvice(PharmacyIntent intent) {
+    final title = intent.title;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (reply.title != null) Text(reply.title!, style: AppTheme.body(fontSize: 14.5, fontWeight: FontWeight.w700)),
-        const SizedBox(height: 4),
-        Text(reply.message, style: AppTheme.body(fontSize: 14)),
+        if (title != null) ...[
+          Semantics(
+            header: true,
+            child: Text(title, style: AppTheme.body(fontSize: 14.5, fontWeight: FontWeight.w700)),
+          ),
+          const SizedBox(height: 4),
+        ],
+        Text(intent.message, style: AppTheme.body(fontSize: 14)),
+        if (intent.steps.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Text(
+            'WHAT YOU CAN DO',
+            style: AppTheme.body(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.inkSoft),
+          ),
+          const SizedBox(height: 6),
+          _BulletList(items: intent.steps),
+        ],
         const SizedBox(height: 12),
         Container(
           width: double.infinity,
@@ -421,19 +482,19 @@ class _BotBubble extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 6),
-              _BulletList(items: reply.seeVet),
+              _BulletList(items: intent.seeVet),
             ],
           ),
         ),
         const SizedBox(height: 12),
-        if (reply.searchKeywords.isNotEmpty)
+        if (intent.searchKeywords.isNotEmpty)
           _ProductSuggestions(
-            keywords: reply.searchKeywords,
-            category: reply.category,
+            keywords: intent.searchKeywords,
+            category: intent.category,
             onSettled: onSettled,
           )
-        else if (reply.noProductsNote != null)
-          Text(reply.noProductsNote!, style: AppTheme.body(fontSize: 13.5, color: AppColors.inkSoft)),
+        else if (intent.noProductsNote != null)
+          Text(intent.noProductsNote!, style: AppTheme.body(fontSize: 13.5, color: AppColors.inkSoft)),
         _VetLink(label: 'Book a video consult with a vet', onPressed: onBookVet),
       ],
     );
@@ -443,11 +504,11 @@ class _BotBubble extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(reply.message, style: AppTheme.body(fontSize: 14)),
+        Text(pharmacyFallbackMessage, style: AppTheme.body(fontSize: 14)),
         const SizedBox(height: 12),
         Wrap(
           spacing: 8,
-          runSpacing: 8,
+          runSpacing: 4,
           children: [
             for (final topic in pharmacyTopics)
               ActionChip(
@@ -479,7 +540,7 @@ class _BulletList extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('•  ', style: AppTheme.body(fontSize: 13.5)),
+                ExcludeSemantics(child: Text('•  ', style: AppTheme.body(fontSize: 13.5))),
                 Expanded(child: Text(item, style: AppTheme.body(fontSize: 13.5))),
               ],
             ),
@@ -505,8 +566,7 @@ class _VetLink extends StatelessWidget {
         style: TextButton.styleFrom(
           foregroundColor: AppColors.primary,
           padding: const EdgeInsets.symmetric(vertical: 6),
-          minimumSize: const Size(0, 36),
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          minimumSize: const Size(0, 48),
           alignment: Alignment.centerLeft,
           textStyle: AppTheme.body(fontSize: 13.5, fontWeight: FontWeight.w600),
         ),
@@ -571,6 +631,13 @@ class _ProductSuggestionsState extends State<_ProductSuggestions> with Automatic
   }
 
   Future<void> _load() async {
+    // Only a retry needs to flip back to the loading state.
+    if (!_loading) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
     final filter = buildProductFilter(widget.keywords);
     var items = <_SuggestedProduct>[];
     String? error;
@@ -578,12 +645,13 @@ class _ProductSuggestionsState extends State<_ProductSuggestions> with Automatic
       try {
         var query = SupabaseService.client
             .from('products')
-            .select(_productColumns)
+            .select(_suggestionColumns)
             .eq('status', 'available')
+            .gt('stock_quantity', 0)
             .or(filter);
         final category = widget.category;
         if (category != null) query = query.eq('category', category);
-        final rows = await query.limit(4);
+        final rows = await withTimeout(query.limit(4));
         items = rows.map(_SuggestedProduct.fromJson).toList();
       } catch (e) {
         error = errorText(e);
@@ -609,17 +677,43 @@ class _ProductSuggestionsState extends State<_ProductSuggestions> with Automatic
     super.build(context);
     if (_loading) {
       return Padding(
-        padding: const EdgeInsets.only(bottom: 4),
-        child: Text('Looking for related products…', style: AppTheme.body(fontSize: 13.5, color: AppColors.inkSoft)),
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Semantics(
+          label: 'Looking for related products',
+          liveRegion: true,
+          child: const ExcludeSemantics(
+            child: Column(
+              children: [
+                SkeletonBox(height: 56, radius: 12),
+                SizedBox(height: 8),
+                SkeletonBox(height: 56, radius: 12),
+              ],
+            ),
+          ),
+        ),
       );
     }
     final error = _error;
     if (error != null) {
       return Padding(
         padding: const EdgeInsets.only(bottom: 4),
-        child: Text(
-          "Couldn't search the store: $error",
-          style: AppTheme.body(fontSize: 13.5, color: AppColors.error),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              "Couldn't search the store: $error",
+              style: AppTheme.body(fontSize: 13.5, color: AppColors.error),
+            ),
+            TextButton.icon(
+              onPressed: _load,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('Retry'),
+              style: TextButton.styleFrom(
+                minimumSize: const Size(64, 48),
+                alignment: Alignment.centerLeft,
+              ),
+            ),
+          ],
         ),
       );
     }
@@ -664,6 +758,7 @@ class _ProductTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         onTap: () => context.push('/store/${product.id}'),
         child: Container(
+          constraints: const BoxConstraints(minHeight: 56),
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(12),
@@ -671,7 +766,7 @@ class _ProductTile extends StatelessWidget {
           ),
           child: Row(
             children: [
-              _ProductThumb(url: product.photoUrl),
+              ExcludeSemantics(child: _ProductThumb(url: product.photoUrl)),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -679,7 +774,7 @@ class _ProductTile extends StatelessWidget {
                   children: [
                     Text(
                       product.name,
-                      maxLines: 1,
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: AppTheme.body(fontSize: 14, fontWeight: FontWeight.w500),
                     ),

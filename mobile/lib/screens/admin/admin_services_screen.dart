@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../data/service_categories.dart';
@@ -5,26 +7,69 @@ import '../../models/service_models.dart';
 import '../../services/supabase_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
-import '../../widgets/role_shell.dart';
+import '../../widgets/seller/seller_common.dart';
 import '../../widgets/shared_widgets.dart';
 import '../../widgets/ui_kit.dart';
+import 'admin_common.dart';
 
 const _recentDays = 30;
+
+const _filters = <StatusFilter>[
+  StatusFilter('pending', 'Pending'),
+  StatusFilter('approved', 'Approved'),
+  StatusFilter('suspended', 'Suspended'),
+  StatusFilter('all', 'All'),
+];
+
+const _statusLabels = {
+  'pending': 'Pending approval',
+  'approved': 'Approved',
+  'suspended': 'Suspended',
+};
 
 const _emptyMessages = {
   'pending': 'No services are waiting for approval.',
   'approved': 'No services are approved yet.',
   'suspended': 'No services are suspended.',
-  'all': 'No services yet.',
 };
 
-/// Platform-wide activity counts for the last [_recentDays] days.
-class _Activity {
-  final int requests;
-  final int bookings;
-  final String? error;
+const _serviceColumns =
+    'id, shop_id, category, name, description, price, duration_minutes, status, created_at, shops(name)';
 
-  const _Activity({this.requests = 0, this.bookings = 0, this.error});
+String _statusOf(ServiceItem service) => service.status;
+
+/// The services plus platform-wide activity counts for the last
+/// [_recentDays] days. A count that failed to load is null (shown as a dash)
+/// so a problem there never hides the approval queue.
+class _ServicesData {
+  final List<ServiceItem> services;
+  final int? requests;
+  final int? bookings;
+
+  const _ServicesData({required this.services, required this.requests, required this.bookings});
+}
+
+Future<int?> _countSince(String table, String since) async {
+  try {
+    final int count = await SupabaseService.client.from(table).count().gte('created_at', since);
+    return count;
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<_ServicesData> _loadServices() async {
+  final since = DateTime.now().subtract(const Duration(days: _recentDays)).toUtc().toIso8601String();
+  // Started first so both run together; neither can throw.
+  final activity = Future.wait<int?>([
+    _countSince('custom_service_requests', since),
+    _countSince('service_bookings', since),
+  ]);
+
+  final rows = await fetchAllRows(() => SupabaseService.client.from('services').select(_serviceColumns));
+  final services = rows.map(ServiceItem.fromJson).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  final counts = await activity;
+  return _ServicesData(services: services, requests: counts[0], bookings: counts[1]);
 }
 
 /// Mirrors src/pages/admin/Services.jsx: the approval queue for seller
@@ -38,220 +83,167 @@ class AdminServicesScreen extends StatefulWidget {
 }
 
 class _AdminServicesScreenState extends State<AdminServicesScreen> {
-  List<ServiceItem> _services = const [];
-  _Activity? _activity;
-  bool _loading = true;
-  bool _loaded = false;
-  String? _error;
-  String _tab = 'pending';
+  late final SellerQuery<_ServicesData> _query;
+  String? _filter;
+  int _limit = kPageSize;
   String? _busyId;
+  String? _busyStatus;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _query = SellerQuery<_ServicesData>(_loadServices);
   }
 
-  Future<List<ServiceItem>> _fetchServices() async {
-    final rows = await SupabaseService.client
-        .from('services')
-        .select('id, shop_id, category, name, description, price, duration_minutes, status, created_at, shops(name)')
-        .order('created_at', ascending: false);
-    return rows.map(ServiceItem.fromJson).toList();
+  @override
+  void dispose() {
+    _query.dispose();
+    super.dispose();
   }
 
-  Future<int> _countSince(String table, String since) async {
-    final int count = await SupabaseService.client.from(table).count().gte('created_at', since);
-    return count;
-  }
+  Future<void> _update(ServiceItem service, String next) async {
+    if (_busyId != null) return;
 
-  /// Never throws: a failed activity count only dims those tiles.
-  Future<_Activity> _fetchActivity() async {
-    final since = DateTime.now().subtract(const Duration(days: _recentDays)).toUtc().toIso8601String();
-    try {
-      final counts = await Future.wait<int>([
-        _countSince('custom_service_requests', since),
-        _countSince('service_bookings', since),
-      ]);
-      return _Activity(requests: counts[0], bookings: counts[1]);
-    } catch (e) {
-      return _Activity(error: errorText(e));
-    }
-  }
-
-  Future<void> _load() async {
-    final activityFuture = _fetchActivity();
-    try {
-      final services = await _fetchServices();
-      final activity = await activityFuture;
-      if (!mounted) return;
-      setState(() {
-        _services = services;
-        _activity = activity;
-        _loaded = true;
-        _error = null;
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      if (_loaded) {
-        // Keep the queue on screen; just report that the refresh failed.
-        showSnack(context, errorText(e), error: true);
-      } else {
-        setState(() {
-          _error = errorText(e);
-          _loading = false;
-        });
-      }
-    }
-  }
-
-  void _retry() {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    _load();
-  }
-
-  Future<void> _updateStatus(ServiceItem service, String nextStatus, {String? confirmMessage}) async {
-    if (confirmMessage != null) {
+    if (next == 'suspended') {
+      final rejecting = service.status == 'pending';
+      final from = service.shopName ?? 'this shop';
       final confirmed = await confirmAction(
         context,
-        title: 'Suspend this service?',
-        message: confirmMessage,
-        confirmLabel: 'Suspend',
+        title: rejecting ? 'Reject this service?' : 'Suspend this service?',
+        message: rejecting
+            ? 'Reject "${service.name}" from $from? It will not be approved. '
+                'It is marked as suspended and can be reactivated later.'
+            : 'Suspend "${service.name}" from $from? It will no longer be visible to customers.',
+        confirmLabel: rejecting ? 'Reject' : 'Suspend',
         destructive: true,
       );
       if (!confirmed || !mounted) return;
     }
 
-    setState(() => _busyId = service.id);
-    try {
-      final rows = await SupabaseService.client
-          .from('services')
-          .update({'status': nextStatus})
-          .eq('id', service.id)
-          .select('id');
-      if (!mounted) return;
-      if (rows.isEmpty) {
-        // RLS filters rows silently, so "no error" alone doesn't prove the update landed.
-        showSnack(context, "That didn't go through — its status may have changed.", error: true);
-      } else {
-        showSnack(context, nextStatus == 'approved' ? 'Approved "${service.name}".' : 'Suspended "${service.name}".');
-      }
-      await _load();
-    } catch (e) {
-      if (!mounted) return;
-      showSnack(context, errorText(e), error: true);
-    } finally {
-      if (mounted) setState(() => _busyId = null);
-    }
-  }
+    setState(() {
+      _busyId = service.id;
+      _busyStatus = next;
+    });
+    // RLS filters rows silently, so updateRow checks that a row really changed;
+    // matching on the status the card showed keeps a stale screen from
+    // overwriting a newer decision.
+    final failure = await updateRow('services', service.id, {'status': next}, match: {'status': service.status});
+    if (!mounted) return;
 
-  Map<String, int> get _counts {
-    final counts = <String, int>{'pending': 0, 'approved': 0, 'suspended': 0, 'all': _services.length};
-    for (final service in _services) {
-      if (counts.containsKey(service.status)) counts[service.status] = counts[service.status]! + 1;
+    if (failure != null) {
+      showSnack(context, failure, error: true);
+      if (failure == kNothingChanged) await _query.reload();
+    } else {
+      showSnack(
+        context,
+        next == 'approved'
+            ? 'Approved "${service.name}".'
+            : service.status == 'pending'
+                ? 'Rejected "${service.name}".'
+                : 'Suspended "${service.name}".',
+      );
+      await _query.reload();
     }
-    return counts;
+    if (!mounted) return;
+    setState(() {
+      _busyId = null;
+      _busyStatus = null;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    return RoleShell(title: 'Services', child: _buildBody());
-  }
+    return AdminScaffold(
+      title: 'Services',
+      heading: 'Manage services',
+      subtitle: 'Review new services before customers can see or book them.',
+      onRefresh: _query.reload,
+      child: SellerQueryPanel<_ServicesData>(
+        query: _query,
+        what: 'services',
+        builder: (context, data) {
+          final services = data.services;
+          final pendingCount = services.where((service) => service.status == 'pending').length;
+          final active = _filter ?? (pendingCount > 0 ? 'pending' : 'all');
+          final visible = applyStatusFilter(_filters, active, services, _statusOf);
+          final shown = math.min(_limit, visible.length);
+          final activityFailed = data.requests == null || data.bookings == null;
 
-  Widget _buildBody() {
-    if (_loading) return const LoadingView(label: 'Loading services…');
-    if (_error != null) return _LoadFailure(message: "Couldn't load services: $_error", onRetry: _retry);
-
-    final counts = _counts;
-    final visible = _tab == 'all' ? _services : _services.where((service) => service.status == _tab).toList();
-    final activity = _activity;
-    final activityFailed = activity?.error != null;
-
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: kScreenPadding,
-        children: [
-          const ScreenHeader(
-            title: 'Manage services',
-            subtitle: 'Review new services before customers can see or book them.',
-          ),
-          const SizedBox(height: 20),
-          CardBox(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Column(
-              children: [
-                _SummaryRow(label: 'Awaiting approval', value: '${counts['pending']}'),
-                const Divider(height: 1, color: AppColors.border),
-                _SummaryRow(
-                  label: 'Custom requests, last $_recentDays days',
-                  value: activityFailed ? '—' : '${activity?.requests ?? 0}',
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              CardBox(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                child: Column(
+                  children: [
+                    _SummaryRow(label: 'Awaiting approval', value: '$pendingCount'),
+                    const Divider(height: 1, color: AppColors.border),
+                    _SummaryRow(
+                      label: 'Custom requests, last $_recentDays days',
+                      value: data.requests == null ? '–' : '${data.requests}',
+                    ),
+                    const Divider(height: 1, color: AppColors.border),
+                    _SummaryRow(
+                      label: 'Service bookings, last $_recentDays days',
+                      value: data.bookings == null ? '–' : '${data.bookings}',
+                    ),
+                  ],
                 ),
-                const Divider(height: 1, color: AppColors.border),
-                _SummaryRow(
-                  label: 'Service bookings, last $_recentDays days',
-                  value: activityFailed ? '—' : '${activity?.bookings ?? 0}',
+              ),
+              if (activityFailed) ...[
+                const SizedBox(height: 10),
+                Text(
+                  "Couldn't load recent activity. Pull down to refresh.",
+                  style: AppTheme.body(fontSize: 13, color: AppColors.error),
                 ),
               ],
-            ),
-          ),
-          if (activityFailed) ...[
-            const SizedBox(height: 10),
-            Text(
-              "Couldn't load recent activity: ${activity!.error}",
-              style: AppTheme.body(fontSize: 13, color: AppColors.error),
-            ),
-          ],
-          const SizedBox(height: 20),
-          FilterChipBar<String>(
-            options: [
-              FilterOption('pending', 'Pending', count: counts['pending']),
-              FilterOption('approved', 'Approved', count: counts['approved']),
-              FilterOption('suspended', 'Suspended', count: counts['suspended']),
-              FilterOption('all', 'All', count: counts['all']),
-            ],
-            selected: _tab,
-            onSelected: (value) => setState(() => _tab = value),
-          ),
-          const SizedBox(height: 16),
-          if (_services.isEmpty)
-            const EmptyState(
-              title: 'No services yet',
-              description: 'Services will appear here once sellers create them.',
-            )
-          else if (visible.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 24),
-              child: Text(
-                _emptyMessages[_tab] ?? 'No services.',
-                textAlign: TextAlign.center,
-                style: AppTheme.body(color: AppColors.inkSoft),
-              ),
-            )
-          else
-            for (final service in visible) ...[
-              _ServiceCard(
-                service: service,
-                busy: _busyId == service.id,
-                onApprove: () => _updateStatus(service, 'approved'),
-                onSuspend: () => _updateStatus(
-                  service,
-                  'suspended',
-                  confirmMessage: service.status == 'approved'
-                      ? 'Suspend "${service.name}" from ${service.shopName ?? 'this shop'}? '
-                          'It will no longer be visible to customers.'
-                      : 'Suspend "${service.name}" from ${service.shopName ?? 'this shop'}? '
-                          'It will not be approved.',
+              const SizedBox(height: 20),
+              if (services.isNotEmpty) ...[
+                FilterChipBar<String>(
+                  options: filterOptions(_filters, services, _statusOf),
+                  selected: active,
+                  onSelected: (value) => setState(() {
+                    _filter = value;
+                    _limit = kPageSize;
+                  }),
                 ),
-              ),
-              const SizedBox(height: 12),
+                const SizedBox(height: 16),
+              ],
+              if (services.isEmpty)
+                const CardBox(
+                  child: EmptyState(
+                    title: 'No services yet',
+                    description: 'Services will appear here once sellers create them.',
+                  ),
+                )
+              else if (visible.isEmpty)
+                CardBox(
+                  child: EmptyState(
+                    title: 'Nothing here',
+                    description: _emptyMessages[active] ?? 'No services match this filter.',
+                  ),
+                )
+              else ...[
+                for (final service in visible.take(shown))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: _ServiceCard(
+                      key: ValueKey(service.id),
+                      service: service,
+                      busyStatus: _busyId == service.id ? _busyStatus : null,
+                      locked: _busyId != null,
+                      onUpdate: (next) => _update(service, next),
+                    ),
+                  ),
+                LoadMoreButton(
+                  shown: shown,
+                  total: visible.length,
+                  onPressed: () => setState(() => _limit += kPageSize),
+                ),
+              ],
             ],
-        ],
+          );
+        },
       ),
     );
   }
@@ -264,14 +256,19 @@ class _SummaryRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Row(
-        children: [
-          Expanded(child: Text(label, style: AppTheme.body(fontSize: 14, color: AppColors.inkSoft))),
-          const SizedBox(width: 12),
-          Text(value, style: AppTheme.display(fontSize: 20, fontWeight: FontWeight.w700)),
-        ],
+    return Semantics(
+      container: true,
+      label: '$label: $value',
+      excludeSemantics: true,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          children: [
+            Expanded(child: Text(label, style: AppTheme.body(fontSize: 14, color: AppColors.inkSoft))),
+            const SizedBox(width: 12),
+            Text(value, style: AppTheme.display(fontSize: 20, fontWeight: FontWeight.w700)),
+          ],
+        ),
       ),
     );
   }
@@ -279,32 +276,26 @@ class _SummaryRow extends StatelessWidget {
 
 class _ServiceCard extends StatelessWidget {
   final ServiceItem service;
-  final bool busy;
-  final VoidCallback onApprove;
-  final VoidCallback onSuspend;
+
+  /// The status being applied to this service right now (null when idle).
+  final String? busyStatus;
+
+  /// True while any service is being updated; all actions wait.
+  final bool locked;
+  final void Function(String status) onUpdate;
 
   const _ServiceCard({
+    super.key,
     required this.service,
-    required this.busy,
-    required this.onApprove,
-    required this.onSuspend,
+    required this.busyStatus,
+    required this.locked,
+    required this.onUpdate,
   });
 
   @override
   Widget build(BuildContext context) {
     final duration = formatDuration(service.durationMinutes);
     final description = (service.description ?? '').trim();
-
-    final approveStyle = ElevatedButton.styleFrom(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      minimumSize: const Size(0, 36),
-      textStyle: AppTheme.body(fontSize: 13, fontWeight: FontWeight.w600),
-    );
-    final suspendStyle = OutlinedButton.styleFrom(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      minimumSize: const Size(0, 36),
-      textStyle: AppTheme.body(fontSize: 13, fontWeight: FontWeight.w600),
-    );
 
     return CardBox(
       child: Column(
@@ -316,11 +307,13 @@ class _ServiceCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   service.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: AppTheme.display(fontSize: 16, fontWeight: FontWeight.w600),
                 ),
               ),
               const SizedBox(width: 8),
-              StatusBadge(status: service.status),
+              StatusBadge(status: service.status, label: _statusLabels[service.status] ?? titleCase(service.status)),
             ],
           ),
           const SizedBox(height: 4),
@@ -346,7 +339,7 @@ class _ServiceCard extends StatelessWidget {
             const SizedBox(height: 8),
             Text(
               description,
-              maxLines: 2,
+              maxLines: 3,
               overflow: TextOverflow.ellipsis,
               style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
             ),
@@ -355,47 +348,33 @@ class _ServiceCard extends StatelessWidget {
           Wrap(
             spacing: 8,
             runSpacing: 8,
-            children: [
-              if (service.status != 'approved')
-                ElevatedButton(
-                  style: approveStyle,
-                  onPressed: busy ? null : onApprove,
-                  child: const Text('Approve'),
-                ),
-              if (service.status == 'approved' || service.status == 'pending')
-                OutlinedButton(
-                  style: suspendStyle,
-                  onPressed: busy ? null : onSuspend,
-                  child: const Text('Suspend'),
-                ),
-            ],
+            children: _actions(),
           ),
         ],
       ),
     );
   }
-}
 
-/// Centered "couldn't load" note with a retry button.
-class _LoadFailure extends StatelessWidget {
-  final String message;
-  final VoidCallback onRetry;
-  const _LoadFailure({required this.message, required this.onRetry});
+  List<Widget> _actions() {
+    Widget approve(String label) => LoadingButton(
+          label: label,
+          loading: busyStatus == 'approved',
+          onPressed: locked ? null : () => onUpdate('approved'),
+        );
+    Widget stop(String label) => LoadingButton(
+          label: label,
+          outlined: true,
+          loading: busyStatus == 'suspended',
+          onPressed: locked ? null : () => onUpdate('suspended'),
+        );
 
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(message, style: AppTheme.body(color: AppColors.error), textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            OutlinedButton(onPressed: onRetry, child: const Text('Try again')),
-          ],
-        ),
-      ),
-    );
+    switch (service.status) {
+      case 'pending':
+        return [approve('Approve'), stop('Reject')];
+      case 'approved':
+        return [stop('Suspend')];
+      default:
+        return [approve('Reactivate')];
+    }
   }
 }

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../core/app_error.dart';
 import '../theme/app_theme.dart';
 import 'shared_widgets.dart';
 
@@ -9,14 +9,13 @@ import 'shared_widgets.dart';
 /// screens (the Flutter counterparts of Modal, Field, StatusBadge and
 /// LoginPrompt in src/components/ui).
 
-/// Human-readable message for any thrown error (Postgrest/Auth exceptions
-/// expose their server message; everything else is stringified).
-String errorText(Object error) {
-  if (error is PostgrestException) return error.message;
-  if (error is AuthException) return error.message;
-  final text = error.toString();
-  return text.startsWith('Exception: ') ? text.substring('Exception: '.length) : text;
-}
+/// Friendly, user-facing message for any thrown error.
+///
+/// Never returns raw exception text: no internet, timeouts, expired sessions,
+/// permission problems (42501), duplicates (23505), foreign keys (23503) and
+/// database functions that are not deployed yet (PGRST202) all map to short
+/// sentences a customer can act on. See `core/app_error.dart`.
+String errorText(Object error) => friendlyError(error);
 
 void showSnack(BuildContext context, String message, {bool error = false}) {
   final messenger = ScaffoldMessenger.maybeOf(context);
@@ -44,6 +43,7 @@ Future<bool> confirmAction(
   final result = await showDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
+      scrollable: true,
       title: Text(title, style: AppTheme.display(fontSize: 18)),
       content: Text(message, style: AppTheme.body(color: AppColors.inkSoft)),
       actions: [
@@ -311,10 +311,13 @@ class LoadingButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final child = loading
-        ? SizedBox(
-            width: 18,
-            height: 18,
-            child: CircularProgressIndicator(strokeWidth: 2, color: outlined ? AppColors.primary : Colors.white),
+        ? Semantics(
+            label: '$label, in progress',
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2, color: outlined ? AppColors.primary : Colors.white),
+            ),
           )
         : Row(
             mainAxisSize: MainAxisSize.min,
@@ -323,7 +326,9 @@ class LoadingButton extends StatelessWidget {
               Flexible(child: Text(label, overflow: TextOverflow.ellipsis)),
             ],
           );
-    final handler = loading ? null : onPressed;
+    // While loading the button keeps its normal colours (so the spinner stays
+    // visible) and simply ignores taps, which is the double-submit guard.
+    final VoidCallback? handler = loading ? () {} : onPressed;
     final button = outlined
         ? OutlinedButton(onPressed: handler, child: child)
         : ElevatedButton(onPressed: handler, child: child);

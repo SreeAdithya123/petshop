@@ -24,6 +24,7 @@ class ServicesTab extends StatefulWidget {
 
 class _ServicesTabState extends State<ServicesTab> {
   String? _deletingId;
+  int _limit = kPageSize;
 
   Future<void> _openForm(ServiceItem? service) {
     return showServiceFormSheet(
@@ -97,8 +98,8 @@ class _ServicesTabState extends State<ServicesTab> {
                   action: widget.readOnly ? null : addButton,
                 ),
               )
-            else
-              for (final service in services)
+            else ...[
+              for (final service in services.take(_limit))
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
                   child: _ServiceCard(
@@ -110,6 +111,12 @@ class _ServicesTabState extends State<ServicesTab> {
                     onDelete: () => _delete(service),
                   ),
                 ),
+              LoadMoreButton(
+                shown: services.length < _limit ? services.length : _limit,
+                total: services.length,
+                onPressed: () => setState(() => _limit += kPageSize),
+              ),
+            ],
           ],
         );
       },

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -7,7 +8,10 @@ import '../../services/supabase_service.dart';
 import '../../state/auth_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
+import '../../widgets/account/about_legal_card.dart';
 import '../../widgets/account/account_widgets.dart';
+import '../../widgets/account/danger_zone.dart';
+import '../../widgets/account/order_items.dart';
 import '../../widgets/account_scaffold.dart';
 import '../../widgets/ui_kit.dart';
 
@@ -51,7 +55,8 @@ List<_QuickLink> _quickLinksFor(String role) {
 }
 
 /// Mirrors src/pages/account/AccountProfile.jsx: who you are, edit name and
-/// phone, log out, and shortcuts to the rest of "My account".
+/// phone, sign out, and shortcuts to the rest of "My account" -- plus the
+/// store-required extras: legal links, support and account deletion.
 class AccountProfileScreen extends StatelessWidget {
   const AccountProfileScreen({super.key});
 
@@ -74,10 +79,12 @@ class _ProfileBody extends ConsumerStatefulWidget {
   ConsumerState<_ProfileBody> createState() => _ProfileBodyState();
 }
 
-class _ProfileBodyState extends ConsumerState<_ProfileBody> {
+class _ProfileBodyState extends ConsumerState<_ProfileBody> with AccountRefreshMixin<_ProfileBody> {
   late Profile _profile = widget.profile;
-  bool _loggingOut = false;
-  String _logoutError = '';
+  bool _signingOut = false;
+  String _signOutError = '';
+  bool _deleting = false;
+  String _deleteError = '';
 
   @override
   void didUpdateWidget(_ProfileBody oldWidget) {
@@ -86,30 +93,98 @@ class _ProfileBodyState extends ConsumerState<_ProfileBody> {
     if (!identical(oldWidget.profile, widget.profile)) _profile = widget.profile;
   }
 
-  Future<void> _logout() async {
-    setState(() {
-      _loggingOut = true;
-      _logoutError = '';
-    });
+  @override
+  Future<void> refreshAccountData() async {
+    try {
+      await ref.read(authControllerProvider).refreshProfile();
+    } catch (_) {
+      // Keep showing the details we already have.
+    }
+  }
+
+  Future<void> _signOut() async {
+    if (_signingOut) return;
+    final confirmed = await confirmAction(
+      context,
+      title: 'Sign out?',
+      message: 'You can log back in any time with your email and password.',
+      confirmLabel: 'Sign out',
+    );
+    if (!confirmed || !mounted) return;
+
+    // Signing out swaps this whole screen for the login gate, so grab the
+    // router before the await instead of relying on this widget staying mounted.
+    final router = GoRouter.of(context);
     final auth = ref.read(authControllerProvider);
+    setState(() {
+      _signingOut = true;
+      _signOutError = '';
+    });
     try {
       await auth.signOut();
-      if (!mounted) return;
-      context.go('/');
     } catch (error) {
       if (!mounted) return;
       setState(() {
-        _loggingOut = false;
-        _logoutError = errorText(error);
+        _signingOut = false;
+        _signOutError = errorText(error);
       });
+      return;
     }
+    clearOrderItemsCache();
+    router.go('/');
+  }
+
+  Future<void> _deleteAccount() async {
+    if (_deleting) return;
+    final confirmed = await showDeleteAccountDialog(context);
+    if (!confirmed || !mounted) return;
+
+    final router = GoRouter.of(context);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final auth = ref.read(authControllerProvider);
+    setState(() {
+      _deleting = true;
+      _deleteError = '';
+    });
+    try {
+      await SupabaseService.client.rpc('delete_my_account');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _deleting = false;
+        _deleteError = rpcErrorText(error);
+      });
+      return;
+    }
+
+    try {
+      await auth.signOut();
+    } catch (_) {
+      // The account is already gone on the server; the local session is
+      // cleared either way.
+    }
+    clearOrderItemsCache();
+    router.go('/');
+    messenger
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text('Your account has been deleted.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
   }
 
   /// Keeps the rest of the app (drawer, Sell prefill, ...) in step with the
   /// saved row, like `useAuthStore.setState({ profile })` on the web.
-  void _handleSaved(Profile saved) {
-    ref.read(authControllerProvider).profile = saved;
-    setState(() => _profile = saved);
+  Future<void> _handleSaved(Profile saved) async {
+    final auth = ref.read(authControllerProvider);
+    if (mounted) setState(() => _profile = saved);
+    try {
+      await auth.refreshProfile();
+    } catch (_) {
+      // The row is saved; the header catches up on the next profile load.
+    }
   }
 
   @override
@@ -132,10 +207,12 @@ class _ProfileBodyState extends ConsumerState<_ProfileBody> {
             children: [
               Row(
                 children: [
-                  CircleAvatar(
-                    radius: 28,
-                    backgroundColor: AppColors.primary.withValues(alpha: 0.1),
-                    child: Text(initial, style: AppTheme.display(fontSize: 22, color: AppColors.primary)),
+                  ExcludeSemantics(
+                    child: CircleAvatar(
+                      radius: 28,
+                      backgroundColor: AppColors.primary.withValues(alpha: 0.1),
+                      child: Text(initial, style: AppTheme.display(fontSize: 22, color: AppColors.primary)),
+                    ),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
@@ -145,7 +222,7 @@ class _ProfileBodyState extends ConsumerState<_ProfileBody> {
                         Text(
                           profile.name.isNotEmpty ? profile.name : 'Your account',
                           style: AppTheme.display(fontSize: 18, fontWeight: FontWeight.w600),
-                          maxLines: 1,
+                          maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
                         if (email.isNotEmpty)
@@ -186,15 +263,15 @@ class _ProfileBodyState extends ConsumerState<_ProfileBody> {
               ),
               const SizedBox(height: 14),
               LoadingButton(
-                label: 'Log out',
+                label: 'Sign out',
                 icon: Icons.logout,
                 outlined: true,
-                loading: _loggingOut,
-                onPressed: _logout,
+                loading: _signingOut,
+                onPressed: _signOut,
               ),
-              if (_logoutError.isNotEmpty) ...[
+              if (_signOutError.isNotEmpty) ...[
                 const SizedBox(height: 10),
-                Text(_logoutError, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
+                Text(_signOutError, style: AppTheme.body(fontSize: 13, color: AppColors.error)),
               ],
             ],
           ),
@@ -210,6 +287,18 @@ class _ProfileBodyState extends ConsumerState<_ProfileBody> {
           _QuickLinkTile(link: link),
           const SizedBox(height: 10),
         ],
+        const SizedBox(height: 22),
+        const SectionTitle('About & legal'),
+        const SizedBox(height: 14),
+        const AboutLegalCard(),
+        const SizedBox(height: 32),
+        DangerZoneCard(
+          role: profile.role,
+          busy: _deleting,
+          error: _deleteError,
+          onDelete: _deleteAccount,
+          onContactSupport: () => context.push('/support'),
+        ),
       ],
     );
   }
@@ -218,7 +307,7 @@ class _ProfileBodyState extends ConsumerState<_ProfileBody> {
 class _DetailsForm extends StatefulWidget {
   final Profile profile;
   final String email;
-  final ValueChanged<Profile> onSaved;
+  final Future<void> Function(Profile saved) onSaved;
 
   const _DetailsForm({required this.profile, required this.email, required this.onSaved});
 
@@ -249,6 +338,8 @@ class _DetailsFormState extends State<_DetailsForm> {
   void _edited(String _) => setState(() => _saved = false);
 
   Future<void> _submit() async {
+    if (_saving) return;
+    FocusScope.of(context).unfocus();
     final name = _nameController.text.trim();
     final phone = _phoneController.text.trim();
     final nameError = name.isEmpty ? 'Enter your name.' : null;
@@ -280,11 +371,12 @@ class _DetailsFormState extends State<_DetailsForm> {
       final saved = Profile.fromJson(row);
       _nameController.text = saved.name;
       _phoneController.text = saved.phone ?? '';
+      await widget.onSaved(saved);
+      if (!mounted) return;
       setState(() {
         _saving = false;
         _saved = true;
       });
-      widget.onSaved(saved);
       showSnack(context, 'Profile updated.');
     } catch (error) {
       if (!mounted) return;
@@ -303,9 +395,11 @@ class _DetailsFormState extends State<_DetailsForm> {
         const FormLabel('Name'),
         TextField(
           controller: _nameController,
+          enabled: !_saving,
           textCapitalization: TextCapitalization.words,
           textInputAction: TextInputAction.next,
           autofillHints: const [AutofillHints.name],
+          inputFormatters: [LengthLimitingTextInputFormatter(80)],
           onChanged: _edited,
           decoration: InputDecoration(errorText: _nameError),
         ),
@@ -313,10 +407,15 @@ class _DetailsFormState extends State<_DetailsForm> {
         const FormLabel('Phone', optional: true),
         TextField(
           controller: _phoneController,
+          enabled: !_saving,
           keyboardType: TextInputType.phone,
           textInputAction: TextInputAction.done,
           autofillHints: const [AutofillHints.telephoneNumber],
+          inputFormatters: [LengthLimitingTextInputFormatter(24)],
           onChanged: _edited,
+          onSubmitted: (_) {
+            if (_dirty) _submit();
+          },
           decoration: InputDecoration(errorText: _phoneError),
         ),
         const SizedBox(height: 16),
@@ -333,19 +432,18 @@ class _DetailsFormState extends State<_DetailsForm> {
           NoticeBox.error(message: _formError),
         ],
         const SizedBox(height: 18),
-        Row(
+        Wrap(
+          spacing: 14,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             LoadingButton(
               label: 'Save changes',
               loading: _saving,
               onPressed: _dirty ? _submit : null,
             ),
-            if (_saved) ...[
-              const SizedBox(width: 14),
-              Expanded(
-                child: Text('Profile updated.', style: AppTheme.body(fontSize: 13.5, color: AppColors.trust)),
-              ),
-            ],
+            if (_saved)
+              Text('Profile updated.', style: AppTheme.body(fontSize: 13.5, color: AppColors.trust)),
           ],
         ),
       ],

@@ -1,448 +1,516 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../models/models.dart';
-import '../../repositories/repositories.dart';
-import '../../state/auth_provider.dart';
+import '../../services/supabase_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
-import '../../widgets/role_shell.dart';
+import '../../widgets/pet_widgets.dart';
+import '../../widgets/seller/seller_common.dart';
+import '../../widgets/seller_scaffold.dart';
 import '../../widgets/shared_widgets.dart';
+import '../../widgets/ui_kit.dart';
 
-/// Ports src/pages/seller/Products.jsx: a shop owner's own product
-/// listings, with an inline "Add a product" form and per-row availability
-/// toggle / Delete actions.
-class SellerProductsScreen extends ConsumerStatefulWidget {
+/// Ports src/pages/seller/Products.jsx: a shop owner's own product listings
+/// with an Add / Edit form in a bottom sheet and per-row availability toggle,
+/// Edit and Delete actions.
+class SellerProductsScreen extends StatelessWidget {
   const SellerProductsScreen({super.key});
 
   @override
-  ConsumerState<SellerProductsScreen> createState() => _SellerProductsScreenState();
+  Widget build(BuildContext context) {
+    return SellerScaffold(
+      title: 'Products',
+      subtitle: 'Your medicine and store listings.',
+      builder: (context, shop) => _ProductsWorkspace(shop: shop),
+    );
+  }
 }
 
-class _SellerProductsScreenState extends ConsumerState<SellerProductsScreen> {
-  Shop? _shop;
-  bool _shopLoading = true;
+const _filters = <StatusFilter>[
+  StatusFilter('all', 'All'),
+  StatusFilter('available', 'Available'),
+  StatusFilter('unavailable', 'Unavailable'),
+];
 
-  List<Product> _products = const [];
-  bool _productsLoading = true;
-  String? _productsError;
+const _categoryLabels = {'medicine': 'Medicine', 'store': 'Store'};
 
-  bool _formOpen = false;
-  Map<String, String> _errors = {};
-  String _formError = '';
-  bool _submitting = false;
+String _statusOf(Product product) => product.status;
 
-  String _category = 'medicine';
-  final _nameCtrl = TextEditingController();
-  final _priceCtrl = TextEditingController();
-  final _stockCtrl = TextEditingController();
-  final _descriptionCtrl = TextEditingController();
-  final _photoUrlsCtrl = TextEditingController();
+Future<List<Product>> _fetchProducts(String shopId) async {
+  final rows = await fetchAllRows(() => SupabaseService.client.from('products').select().eq('shop_id', shopId));
+  final products = rows.map(Product.fromJson).toList()..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  return products;
+}
+
+class _ProductsWorkspace extends ConsumerStatefulWidget {
+  final Shop shop;
+  const _ProductsWorkspace({required this.shop});
+
+  @override
+  ConsumerState<_ProductsWorkspace> createState() => _ProductsWorkspaceState();
+}
+
+class _ProductsWorkspaceState extends ConsumerState<_ProductsWorkspace> {
+  late final SellerQuery<List<Product>> _query;
+  String _filter = 'all';
+  int _limit = kPageSize;
+  String? _busyId;
 
   @override
   void initState() {
     super.initState();
-    _loadShop();
+    final shopId = widget.shop.id;
+    _query = SellerQuery<List<Product>>(() => _fetchProducts(shopId));
   }
 
   @override
   void dispose() {
-    _nameCtrl.dispose();
-    _priceCtrl.dispose();
-    _stockCtrl.dispose();
-    _descriptionCtrl.dispose();
-    _photoUrlsCtrl.dispose();
+    _query.dispose();
     super.dispose();
   }
 
-  Future<void> _loadShop() async {
-    final profile = ref.read(authControllerProvider).profile;
-    if (profile == null) {
-      setState(() {
-        _shopLoading = false;
-        _productsLoading = false;
-      });
-      return;
-    }
-    try {
-      final shop = await ShopsRepository().getByOwnerId(profile.id);
-      if (!mounted) return;
-      setState(() {
-        _shop = shop;
-        _shopLoading = false;
-      });
-      if (shop != null) {
-        await _loadProducts(shop.id);
-      } else {
-        setState(() => _productsLoading = false);
-      }
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _shopLoading = false;
-        _productsLoading = false;
-      });
-    }
-  }
-
-  Future<void> _loadProducts([String? shopId]) async {
-    final id = shopId ?? _shop?.id;
-    if (id == null) return;
-    setState(() {
-      _productsLoading = true;
-      _productsError = null;
-    });
-    try {
-      final products = await ProductsRepository().listByShop(id);
-      if (!mounted) return;
-      setState(() {
-        _products = products;
-        _productsLoading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _productsError = _describeError(e, 'Something went wrong loading your products.');
-        _productsLoading = false;
-      });
-    }
-  }
-
-  String _describeError(Object error, String fallback) {
-    if (error is PostgrestException) {
-      return error.message.isNotEmpty ? error.message : fallback;
-    }
-    final text = error.toString();
-    return text.isNotEmpty ? text : fallback;
-  }
-
-  Map<String, String> _validate() {
-    final errors = <String, String>{};
-    if (_nameCtrl.text.trim().isEmpty) errors['name'] = 'Enter a product name.';
-
-    final priceText = _priceCtrl.text.trim();
-    if (priceText.isEmpty) {
-      errors['price'] = 'Enter a price.';
-    } else {
-      final price = num.tryParse(priceText);
-      if (price == null || price < 0) errors['price'] = 'Enter a valid price.';
-    }
-
-    final stockText = _stockCtrl.text.trim();
-    if (stockText.isEmpty) {
-      errors['stock_quantity'] = 'Enter a stock quantity.';
-    } else {
-      final stock = num.tryParse(stockText);
-      if (stock == null || stock < 0) errors['stock_quantity'] = 'Enter a valid stock quantity.';
-    }
-
-    return errors;
-  }
-
-  void _clearForm() {
-    setState(() => _category = 'medicine');
-    _nameCtrl.clear();
-    _priceCtrl.clear();
-    _stockCtrl.clear();
-    _descriptionCtrl.clear();
-    _photoUrlsCtrl.clear();
-  }
-
-  Future<void> _submit() async {
-    setState(() => _formError = '');
-    final errors = _validate();
-    setState(() => _errors = errors);
-    if (errors.isNotEmpty) return;
-
-    setState(() => _submitting = true);
-    try {
-      final photoUrls = _photoUrlsCtrl.text
-          .split(',')
-          .map((u) => u.trim())
-          .where((u) => u.isNotEmpty)
-          .toList();
-      final description = _descriptionCtrl.text.trim();
-
-      await ProductsRepository().insert({
-        'shop_id': _shop!.id,
-        'category': _category,
-        'name': _nameCtrl.text.trim(),
-        'description': description.isEmpty ? null : description,
-        'price': num.parse(_priceCtrl.text.trim()),
-        'stock_quantity': num.parse(_stockCtrl.text.trim()).round(),
-        'photo_urls': photoUrls,
-      });
-
-      _clearForm();
-      if (!mounted) return;
-      setState(() {
-        _errors = {};
-        _formOpen = false;
-      });
-      await _loadProducts();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _formError = _describeError(e, 'Something went wrong adding this product.'));
-    } finally {
-      if (mounted) setState(() => _submitting = false);
-    }
+  Future<void> _openForm([Product? product]) async {
+    final saved = await showFormSheet<bool>(
+      context,
+      title: product == null ? 'Add a product' : 'Edit product',
+      builder: (sheetContext) => _ProductForm(shopId: widget.shop.id, product: product),
+    );
+    if (saved != true || !mounted) return;
+    showSnack(context, product == null ? 'Product added.' : 'Product updated.');
+    _query.reload();
   }
 
   Future<void> _toggleAvailability(Product product) async {
-    final nextStatus = product.status == 'available' ? 'unavailable' : 'available';
-    try {
-      await ProductsRepository().update(product.id, {'status': nextStatus});
-      await _loadProducts();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(_describeError(e, 'Could not update this listing.'))));
+    if (_busyId != null) return;
+    final next = product.status == 'available' ? 'unavailable' : 'available';
+    setState(() => _busyId = product.id);
+    final failure = await updateRow('products', product.id, {'status': next}, match: {'status': product.status});
+    if (!mounted) return;
+    setState(() => _busyId = null);
+
+    if (failure != null) {
+      showSnack(context, failure, error: true);
+      if (failure == kNothingChanged) _query.reload();
+      return;
     }
+    showSnack(context, next == 'available' ? 'Now available to customers.' : 'Hidden from customers.');
+    _query.reload();
   }
 
-  Future<bool> _confirmDelete() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete this listing?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text('Delete', style: AppTheme.body(color: AppColors.error, fontWeight: FontWeight.w600)),
-          ),
-        ],
-      ),
+  Future<void> _delete(Product product) async {
+    if (_busyId != null) return;
+    final confirmed = await confirmAction(
+      context,
+      title: 'Delete this listing?',
+      message: '${product.name} will be removed from your shop. This can\'t be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
     );
-    return confirmed ?? false;
-  }
+    if (!confirmed || !mounted) return;
 
-  Future<void> _deleteProduct(String productId) async {
-    final confirmed = await _confirmDelete();
-    if (!confirmed) return;
-    try {
-      await ProductsRepository().delete(productId);
-      await _loadProducts();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(_describeError(e, 'Could not delete this listing.'))));
+    setState(() => _busyId = product.id);
+    final failure = await deleteRow('products', product.id);
+    if (!mounted) return;
+    setState(() => _busyId = null);
+
+    if (failure != null) {
+      showSnack(context, failure, error: true);
+      return;
     }
-  }
-
-  String _capitalize(String s) => s.isEmpty ? s : '${s[0].toUpperCase()}${s.substring(1)}';
-
-  Color _statusColor(String status) {
-    switch (status) {
-      case 'available':
-        return AppColors.trust;
-      default:
-        return AppColors.inkSoft;
-    }
+    showSnack(context, 'Listing deleted.');
+    _query.reload();
   }
 
   @override
   Widget build(BuildContext context) {
-    return RoleShell(
-      title: 'Products',
-      child: _buildBody(),
-    );
-  }
+    listenForShopRefresh(ref, _query.reload);
+    final readOnly = widget.shop.status == 'suspended';
 
-  Widget _buildBody() {
-    if (_shopLoading) return const LoadingView();
+    return SellerQueryPanel<List<Product>>(
+      query: _query,
+      what: 'your products',
+      builder: (context, products) {
+        final visible = applyStatusFilter(_filters, _filter, products, _statusOf);
+        final shown = math.min(_limit, visible.length);
+        final addButton = ElevatedButton.icon(
+          onPressed: () => _openForm(),
+          icon: const Icon(Icons.add, size: 18),
+          label: const Text('Add a product'),
+        );
 
-    if (_shop == null) {
-      return Padding(
-        padding: kScreenPadding,
-        child: EmptyState(
-          title: "You haven't set up your shop yet",
-          description: 'Create your shop profile to start listing pets and products.',
-          action: ElevatedButton(
-            onPressed: () => context.push('/seller/store'),
-            child: const Text('Set up your shop'),
-          ),
-        ),
-      );
-    }
-
-    return ListView(
-      padding: kScreenPadding,
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(
-              child: Text('Products', style: AppTheme.display(fontSize: 26, fontWeight: FontWeight.w700)),
-            ),
-            const SizedBox(width: 12),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                textStyle: AppTheme.body(fontWeight: FontWeight.w600, fontSize: 14),
-              ),
-              onPressed: () => setState(() => _formOpen = !_formOpen),
-              child: Text(_formOpen ? 'Cancel' : 'Add a product'),
-            ),
-          ],
-        ),
-        if (_formOpen) ...[
-          const SizedBox(height: 20),
-          _buildForm(),
-        ],
-        const SizedBox(height: 28),
-        _buildProductsList(),
-      ],
-    );
-  }
-
-  Widget _buildForm() {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          DropdownButtonFormField<String>(
-            initialValue: _category,
-            decoration: const InputDecoration(labelText: 'Category'),
-            items: const [
-              DropdownMenuItem(value: 'medicine', child: Text('Medicine')),
-              DropdownMenuItem(value: 'store', child: Text('Store')),
+            if (!readOnly && products.isNotEmpty) ...[
+              Align(alignment: Alignment.centerLeft, child: addButton),
+              const SizedBox(height: 16),
             ],
-            onChanged: (value) => setState(() => _category = value ?? 'medicine'),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _nameCtrl,
-            decoration: InputDecoration(labelText: 'Product name', errorText: _errors['name']),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _priceCtrl,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            decoration: InputDecoration(labelText: 'Price', errorText: _errors['price']),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _stockCtrl,
-            keyboardType: const TextInputType.numberWithOptions(decimal: false),
-            decoration: InputDecoration(labelText: 'Stock quantity', errorText: _errors['stock_quantity']),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _descriptionCtrl,
-            minLines: 3,
-            maxLines: 5,
-            decoration: const InputDecoration(labelText: 'Description'),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _photoUrlsCtrl,
-            decoration: const InputDecoration(
-              labelText: 'Photo URLs',
-              hintText: 'https://example.com/photo1.jpg, https://example.com/photo2.jpg',
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text('Separate multiple URLs with commas.', style: AppTheme.body(fontSize: 12, color: AppColors.inkSoft)),
-          if (_formError.isNotEmpty) ...[
-            const SizedBox(height: 16),
-            Text(_formError, style: AppTheme.body(color: AppColors.error)),
+            if (products.isNotEmpty) ...[
+              FilterChipBar<String>(
+                options: filterOptions(_filters, products, _statusOf),
+                selected: _filter,
+                onSelected: (value) => setState(() {
+                  _filter = value;
+                  _limit = kPageSize;
+                }),
+              ),
+              const SizedBox(height: 16),
+            ],
+            if (products.isEmpty)
+              CardBox(
+                child: EmptyState(
+                  title: 'No products listed yet',
+                  description: 'Add your first product to start reaching customers.',
+                  action: readOnly ? null : addButton,
+                ),
+              )
+            else if (visible.isEmpty)
+              const CardBox(
+                child: EmptyState(title: 'Nothing here', description: 'No products match this filter.'),
+              )
+            else ...[
+              for (final product in visible.take(shown))
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: _ProductCard(
+                    key: ValueKey(product.id),
+                    product: product,
+                    readOnly: readOnly,
+                    busy: _busyId == product.id,
+                    onToggle: () => _toggleAvailability(product),
+                    onEdit: () => _openForm(product),
+                    onDelete: () => _delete(product),
+                  ),
+                ),
+              LoadMoreButton(
+                shown: shown,
+                total: visible.length,
+                onPressed: () => setState(() => _limit += kPageSize),
+              ),
+            ],
           ],
-          const SizedBox(height: 20),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: ElevatedButton(
-              onPressed: _submitting ? null : _submit,
-              child: Text(_submitting ? 'Adding…' : 'Add product'),
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
+}
 
-  Widget _buildProductsList() {
-    if (_productsLoading) return const LoadingView();
-    if (_productsError != null) return ErrorView(message: _productsError!);
-    if (_products.isEmpty) {
-      if (_formOpen) return const SizedBox.shrink();
-      return const EmptyState(
-        title: 'No products listed yet',
-        description: 'Add your first product to start reaching customers.',
-      );
-    }
+class _ProductCard extends StatelessWidget {
+  final Product product;
+  final bool readOnly;
+  final bool busy;
+  final VoidCallback onToggle;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Column(
-        children: [
-          for (var i = 0; i < _products.length; i++) ...[
-            if (i > 0) const Divider(height: 1, color: AppColors.border),
-            _buildProductRow(_products[i]),
-          ],
-        ],
-      ),
-    );
-  }
+  const _ProductCard({
+    super.key,
+    required this.product,
+    required this.readOnly,
+    required this.busy,
+    required this.onToggle,
+    required this.onEdit,
+    required this.onDelete,
+  });
 
-  Widget _buildProductRow(Product product) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+  @override
+  Widget build(BuildContext context) {
+    final available = product.status == 'available';
+    final outOfStock = product.stockQuantity <= 0;
+    final category = _categoryLabels[product.category] ?? titleCase(product.category);
+
+    return CardBox(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(product.name, style: AppTheme.body(fontWeight: FontWeight.w600)),
-          const SizedBox(height: 4),
-          Text(
-            '${_capitalize(product.category)} · ${product.stockQuantity} in stock',
-            style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 16,
-            runSpacing: 6,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                formatPrice(product.price),
-                style: AppTheme.body(fontWeight: FontWeight.w600, color: AppColors.accent),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: SizedBox(
+                  width: 56,
+                  height: 56,
+                  child: ProductPhotoView(
+                    src: product.photoUrls.isNotEmpty ? product.photoUrls.first : null,
+                    category: product.category,
+                    cacheWidth: 112,
+                    semanticLabel: 'Photo of ${product.name}',
+                  ),
+                ),
               ),
-              Text(
-                _capitalize(product.status),
-                style: AppTheme.body(fontWeight: FontWeight.w600, color: _statusColor(product.status)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      product.name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTheme.display(fontSize: 16, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '$category · ${product.stockQuantity} in stock',
+                      style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
+                    ),
+                  ],
+                ),
               ),
+              const SizedBox(width: 8),
+              StatusBadge(status: product.status, label: titleCase(product.status)),
             ],
           ),
           const SizedBox(height: 10),
           Wrap(
             spacing: 12,
-            runSpacing: 8,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              OutlinedButton(
-                onPressed: () => _toggleAvailability(product),
-                child: Text(product.status == 'available' ? 'Mark unavailable' : 'Mark available'),
+              Text(
+                formatPrice(product.price),
+                style: AppTheme.body(fontWeight: FontWeight.w600, color: AppColors.accent),
               ),
-              TextButton(
-                style: TextButton.styleFrom(foregroundColor: AppColors.primary),
-                onPressed: () => _deleteProduct(product.id),
-                child: const Text('Delete'),
-              ),
+              if (outOfStock)
+                Text('Out of stock', style: AppTheme.body(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.error)),
             ],
+          ),
+          if (!readOnly) ...[
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                OutlinedButton(
+                  onPressed: busy ? null : onToggle,
+                  child: Text(available ? 'Mark unavailable' : 'Mark available'),
+                ),
+                TextButton(
+                  onPressed: busy ? null : onEdit,
+                  child: const Text('Edit'),
+                ),
+                TextButton(
+                  onPressed: busy ? null : onDelete,
+                  style: TextButton.styleFrom(foregroundColor: AppColors.error),
+                  child: const Text('Delete'),
+                ),
+                if (busy)
+                  Semantics(
+                    label: 'Saving',
+                    child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Add / edit form shown in a bottom sheet. Pops with `true` once saved.
+class _ProductForm extends StatefulWidget {
+  final String shopId;
+  final Product? product;
+  const _ProductForm({required this.shopId, this.product});
+
+  @override
+  State<_ProductForm> createState() => _ProductFormState();
+}
+
+class _ProductFormState extends State<_ProductForm> {
+  late final TextEditingController _name;
+  late final TextEditingController _price;
+  late final TextEditingController _stock;
+  late final TextEditingController _description;
+  late final TextEditingController _photos;
+  late String _category;
+
+  String? _nameError;
+  String? _priceError;
+  String? _stockError;
+  String? _photosError;
+  String? _formError;
+  bool _submitting = false;
+
+  bool get _editing => widget.product != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final product = widget.product;
+    _name = TextEditingController(text: product?.name ?? '');
+    _price = TextEditingController(text: product == null ? '' : plainNumber(product.price));
+    _stock = TextEditingController(text: product == null ? '' : '${product.stockQuantity}');
+    _description = TextEditingController(text: product?.description ?? '');
+    _photos = TextEditingController(text: product?.photoUrls.join(', ') ?? '');
+    _category = (product != null && _categoryLabels.containsKey(product.category)) ? product.category : 'medicine';
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _price.dispose();
+    _stock.dispose();
+    _description.dispose();
+    _photos.dispose();
+    super.dispose();
+  }
+
+  bool _validate() {
+    String? nameError;
+    String? priceError;
+    String? stockError;
+
+    if (_name.text.trim().isEmpty) nameError = 'Enter a product name.';
+
+    final priceText = _price.text.trim();
+    final price = parseAmount(priceText);
+    if (priceText.isEmpty) {
+      priceError = 'Enter a price.';
+    } else if (price == null || price <= 0) {
+      priceError = 'Price must be greater than zero.';
+    }
+
+    final stockText = _stock.text.trim();
+    final stock = int.tryParse(stockText);
+    if (stockText.isEmpty) {
+      stockError = 'Enter a stock quantity.';
+    } else if (stock == null || stock < 0) {
+      stockError = 'Enter a whole number, like 12.';
+    }
+
+    final photosError = photoUrlsError(_photos.text);
+
+    setState(() {
+      _nameError = nameError;
+      _priceError = priceError;
+      _stockError = stockError;
+      _photosError = photosError;
+    });
+    return nameError == null && priceError == null && stockError == null && photosError == null;
+  }
+
+  Future<void> _submit() async {
+    if (_submitting) return;
+    FocusScope.of(context).unfocus();
+    setState(() => _formError = null);
+    if (!_validate()) return;
+
+    final description = _description.text.trim();
+    final payload = <String, dynamic>{
+      'category': _category,
+      'name': _name.text.trim(),
+      'description': description.isEmpty ? null : description,
+      'price': parseAmount(_price.text)!,
+      'stock_quantity': int.parse(_stock.text.trim()),
+      'photo_urls': parseUrlList(_photos.text),
+    };
+
+    setState(() => _submitting = true);
+    final product = widget.product;
+    final failure = product == null
+        ? await insertRow('products', {'shop_id': widget.shopId, ...payload})
+        : await updateRow('products', product.id, payload);
+    if (!mounted) return;
+
+    if (failure != null) {
+      setState(() {
+        _submitting = false;
+        _formError = failure;
+      });
+      return;
+    }
+    Navigator.of(context).pop(true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = !_submitting;
+    return PopScope(
+      canPop: !_submitting,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          DropdownButtonFormField<String>(
+            initialValue: _category,
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: 'Category'),
+            items: [
+              for (final entry in _categoryLabels.entries)
+                DropdownMenuItem<String>(value: entry.key, child: Text(entry.value)),
+            ],
+            onChanged: enabled ? (value) => setState(() => _category = value ?? 'medicine') : null,
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _name,
+            enabled: enabled,
+            textCapitalization: TextCapitalization.sentences,
+            inputFormatters: [LengthLimitingTextInputFormatter(120)],
+            decoration: InputDecoration(labelText: 'Product name', errorText: _nameError, errorMaxLines: 2),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _price,
+            enabled: enabled,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+            decoration: InputDecoration(
+              labelText: 'Price (INR)',
+              prefixText: '₹ ',
+              errorText: _priceError,
+              errorMaxLines: 2,
+            ),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _stock,
+            enabled: enabled,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(6)],
+            decoration: InputDecoration(labelText: 'Stock quantity', errorText: _stockError, errorMaxLines: 2),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _description,
+            enabled: enabled,
+            minLines: 3,
+            maxLines: 5,
+            textCapitalization: TextCapitalization.sentences,
+            decoration: const InputDecoration(labelText: 'Description', alignLabelWithHint: true),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _photos,
+            enabled: enabled,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            decoration: InputDecoration(
+              labelText: 'Photo URLs',
+              hintText: 'https://example.com/photo1.jpg, https://example.com/photo2.jpg',
+              helperText: 'Separate multiple links with commas.',
+              errorText: _photosError,
+              errorMaxLines: 2,
+            ),
+          ),
+          if (_formError != null) ...[
+            const SizedBox(height: 14),
+            NoticeBox.error(message: _formError!),
+          ],
+          const SizedBox(height: 20),
+          LoadingButton(
+            label: _editing ? 'Save changes' : 'Add product',
+            loading: _submitting,
+            expand: true,
+            onPressed: _submit,
           ),
         ],
       ),

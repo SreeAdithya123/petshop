@@ -20,7 +20,7 @@ class LearnScreen extends StatelessWidget {
     return AccountScaffold(
       path: '/account/learn',
       title: 'Learn',
-      subtitle: 'Videos on pet care, from our shops and our team.',
+      subtitle: 'Pet care videos picked by the PETSTA team. They open in your browser or video app.',
       builder: (context, profile) => const _LearnBody(),
     );
   }
@@ -33,7 +33,7 @@ class _LearnBody extends StatefulWidget {
   State<_LearnBody> createState() => _LearnBodyState();
 }
 
-class _LearnBodyState extends State<_LearnBody> {
+class _LearnBodyState extends State<_LearnBody> with AccountRefreshMixin<_LearnBody> {
   List<ReferenceVideo>? _videos;
   String? _error;
 
@@ -42,6 +42,9 @@ class _LearnBodyState extends State<_LearnBody> {
     super.initState();
     _load();
   }
+
+  @override
+  Future<void> refreshAccountData() => _load();
 
   void _retry() {
     setState(() {
@@ -77,9 +80,14 @@ class _LearnBodyState extends State<_LearnBody> {
     if (videos == null) return const AccountLoadingNote();
 
     if (videos.isEmpty) {
-      return const EmptyState(
+      return EmptyState(
         title: 'No videos yet',
         description: 'Check back soon for pet care tips.',
+        action: OutlinedButton.icon(
+          onPressed: _load,
+          icon: const Icon(Icons.refresh, size: 18),
+          label: const Text('Refresh'),
+        ),
       );
     }
 
@@ -110,60 +118,71 @@ class _VideoCard extends StatelessWidget {
 
     final placeholder = Container(color: AppColors.primary.withValues(alpha: 0.05));
 
-    return Material(
-      color: AppColors.surface,
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(14),
-        onTap: uri == null ? null : () => openExternalUri(context, uri),
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: AppColors.border),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    // The thumbnail is decorative: the title and category carry the meaning.
+    final thumbnailView = ExcludeSemantics(
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Stack(
+            fit: StackFit.expand,
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: AspectRatio(
-                  aspectRatio: 16 / 9,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      if (thumbnail != null && thumbnail.isNotEmpty)
-                        CachedNetworkImage(
-                          imageUrl: thumbnail,
-                          fit: BoxFit.cover,
-                          placeholder: (context, url) => placeholder,
-                          errorWidget: (context, url, error) => placeholder,
-                        )
-                      else
-                        placeholder,
-                      if (uri != null)
-                        Center(
-                          child: Container(
-                            width: 44,
-                            height: 44,
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.55),
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 28),
-                          ),
-                        ),
-                    ],
+              if (thumbnail != null && thumbnail.isNotEmpty)
+                CachedNetworkImage(
+                  imageUrl: thumbnail,
+                  fit: BoxFit.cover,
+                  memCacheWidth: 800,
+                  placeholder: (context, url) => placeholder,
+                  errorWidget: (context, url, error) => placeholder,
+                )
+              else
+                placeholder,
+              if (uri != null)
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 28),
                   ),
                 ),
-              ),
-              const SizedBox(height: 10),
-              Text(video.title, style: AppTheme.body(fontWeight: FontWeight.w600)),
-              if (category != null && category.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text(titleCase(category), style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
-              ],
             ],
+          ),
+        ),
+      ),
+    );
+
+    return Semantics(
+      container: true,
+      button: uri != null,
+      hint: uri == null ? null : 'Opens the video in your browser',
+      child: Material(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: uri == null ? null : () => openExternalUri(context, uri),
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                thumbnailView,
+                const SizedBox(height: 10),
+                Text(video.title, style: AppTheme.body(fontWeight: FontWeight.w600)),
+                if (category != null && category.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(titleCase(category), style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft)),
+                ],
+              ],
+            ),
           ),
         ),
       ),

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../models/service_models.dart';
 import '../../services/supabase_service.dart';
@@ -49,7 +50,7 @@ class _AddressesBody extends StatefulWidget {
   State<_AddressesBody> createState() => _AddressesBodyState();
 }
 
-class _AddressesBodyState extends State<_AddressesBody> {
+class _AddressesBodyState extends State<_AddressesBody> with AccountRefreshMixin<_AddressesBody> {
   List<SavedAddress>? _addresses;
   String? _loadError;
   String? _busyId;
@@ -60,6 +61,9 @@ class _AddressesBodyState extends State<_AddressesBody> {
     super.initState();
     _load();
   }
+
+  @override
+  Future<void> refreshAccountData() => _load();
 
   void _retryLoad() {
     setState(() {
@@ -110,6 +114,7 @@ class _AddressesBodyState extends State<_AddressesBody> {
   }
 
   Future<void> _setDefault(SavedAddress address) async {
+    if (_busyId != null) return;
     setState(() {
       _busyId = address.id;
       _actionError = '';
@@ -129,6 +134,7 @@ class _AddressesBodyState extends State<_AddressesBody> {
   }
 
   Future<void> _delete(SavedAddress address) async {
+    if (_busyId != null) return;
     final confirmed = await confirmAction(
       context,
       title: 'Delete address?',
@@ -143,11 +149,13 @@ class _AddressesBodyState extends State<_AddressesBody> {
       _actionError = '';
     });
     try {
+      // An empty result means it was already gone; either way it is not in the list any more.
       await SupabaseService.client
           .from('addresses')
           .delete()
           .eq('id', address.id)
-          .eq('customer_id', widget.userId);
+          .eq('customer_id', widget.userId)
+          .select('id');
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -181,7 +189,7 @@ class _AddressesBodyState extends State<_AddressesBody> {
               icon: const Icon(Icons.add, size: 18),
               label: const Text('Add address'),
               style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.accent,
+                backgroundColor: kAccountCtaColor,
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               ),
             ),
@@ -198,7 +206,7 @@ class _AddressesBodyState extends State<_AddressesBody> {
               onPressed: () => _openForm(),
               icon: const Icon(Icons.add, size: 18),
               label: const Text('Add an address'),
-              style: ElevatedButton.styleFrom(backgroundColor: AppColors.accent),
+              style: ElevatedButton.styleFrom(backgroundColor: kAccountCtaColor),
             ),
           )
         else ...[
@@ -360,6 +368,8 @@ class _AddressFormState extends State<_AddressForm> {
   }
 
   Future<void> _save() async {
+    if (_saving) return;
+    FocusScope.of(context).unfocus();
     final errors = _validate();
     setState(() => _errors = errors);
     if (errors.isNotEmpty) return;
@@ -463,6 +473,7 @@ class _AddressFormState extends State<_AddressForm> {
           textInputAction: TextInputAction.next,
           textCapitalization: TextCapitalization.words,
           autofillHints: const [AutofillHints.streetAddressLine1],
+          inputFormatters: [LengthLimitingTextInputFormatter(120)],
           decoration: InputDecoration(errorText: _errors['line1']),
         ),
         const SizedBox(height: 16),
@@ -473,6 +484,7 @@ class _AddressFormState extends State<_AddressForm> {
           textInputAction: TextInputAction.next,
           textCapitalization: TextCapitalization.words,
           autofillHints: const [AutofillHints.streetAddressLine2],
+          inputFormatters: [LengthLimitingTextInputFormatter(120)],
         ),
         const SizedBox(height: 16),
         const FormLabel('City'),
@@ -482,6 +494,7 @@ class _AddressFormState extends State<_AddressForm> {
           textInputAction: TextInputAction.next,
           textCapitalization: TextCapitalization.words,
           autofillHints: const [AutofillHints.addressCity],
+          inputFormatters: [LengthLimitingTextInputFormatter(60)],
           decoration: InputDecoration(errorText: _errors['city']),
         ),
         const SizedBox(height: 16),
@@ -492,6 +505,7 @@ class _AddressFormState extends State<_AddressForm> {
           textInputAction: TextInputAction.next,
           textCapitalization: TextCapitalization.words,
           autofillHints: const [AutofillHints.addressState],
+          inputFormatters: [LengthLimitingTextInputFormatter(60)],
         ),
         const SizedBox(height: 16),
         const FormLabel('PIN / ZIP code'),
@@ -500,6 +514,8 @@ class _AddressFormState extends State<_AddressForm> {
           enabled: !_saving,
           textInputAction: TextInputAction.done,
           autofillHints: const [AutofillHints.postalCode],
+          inputFormatters: [LengthLimitingTextInputFormatter(10)],
+          onSubmitted: (_) => _save(),
           decoration: InputDecoration(errorText: _errors['zip']),
         ),
         const SizedBox(height: 8),

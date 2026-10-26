@@ -1,19 +1,21 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'dart:math' as math;
 
-import '../../models/models.dart';
-import '../../repositories/repositories.dart';
+import 'package:flutter/material.dart';
+
 import '../../theme/app_theme.dart';
-import '../../widgets/role_shell.dart';
+import '../../utils/format.dart';
+import '../../widgets/seller/seller_common.dart';
 import '../../widgets/shared_widgets.dart';
+import '../../widgets/ui_kit.dart';
+import 'admin_common.dart';
 
 /// Matches src/pages/admin/Contracts.jsx: which shops have accepted the
 /// current seller contract version.
-class AdminContractsScreen extends ConsumerStatefulWidget {
+class AdminContractsScreen extends StatefulWidget {
   const AdminContractsScreen({super.key});
 
   @override
-  ConsumerState<AdminContractsScreen> createState() => _AdminContractsScreenState();
+  State<AdminContractsScreen> createState() => _AdminContractsScreenState();
 }
 
 const _defaultVersion = '1.0';
@@ -25,7 +27,14 @@ const _contractBody = "This agreement sets out the terms under which a shop list
     "individual sale. Shop owners are expected to review and accept the current version to "
     "keep selling on the platform.";
 
-String _mostCommonVersion(List<Shop> shops) {
+const _filters = <StatusFilter>[
+  StatusFilter('all', 'All'),
+  StatusFilter('missing', 'Not accepted'),
+  StatusFilter('accepted', 'Accepted'),
+];
+
+/// The version most shops have accepted (the web app's rule for "current").
+String _mostCommonVersion(List<AdminShopRow> shops) {
   final counts = <String, int>{};
   for (final shop in shops) {
     final version = shop.contractVersion;
@@ -44,161 +53,191 @@ String _mostCommonVersion(List<Shop> shops) {
   return best ?? _defaultVersion;
 }
 
-class _AdminContractsScreenState extends ConsumerState<AdminContractsScreen> {
-  bool _loading = true;
-  String? _error;
-  List<Shop> _shops = [];
-  String _currentVersion = _defaultVersion;
+bool _hasAccepted(AdminShopRow shop, String currentVersion) =>
+    shop.hasAcceptedContract && shop.contractVersion == currentVersion;
+
+/// The shops (A to Z) and the version they are measured against.
+class _ContractsData {
+  final List<AdminShopRow> shops;
+  final String currentVersion;
+  const _ContractsData(this.shops, this.currentVersion);
+}
+
+Future<_ContractsData> _loadContracts() async {
+  final shops = await fetchAdminShops();
+  shops.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+  return _ContractsData(shops, _mostCommonVersion(shops));
+}
+
+class _AdminContractsScreenState extends State<AdminContractsScreen> {
+  late final SellerQuery<_ContractsData> _query;
+  String _filter = 'all';
+  int _limit = kPageSize;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _query = SellerQuery<_ContractsData>(_loadContracts);
   }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final shops = await ShopsRepository().listAllWithOwner();
-      shops.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-      if (!mounted) return;
-      setState(() {
-        _shops = shops;
-        _currentVersion = _mostCommonVersion(shops);
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e.toString();
-        _loading = false;
-      });
-    }
+  @override
+  void dispose() {
+    _query.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return RoleShell(title: 'Contracts', child: _buildBody());
-  }
+    return AdminScaffold(
+      title: 'Contracts',
+      heading: 'Contract compliance',
+      subtitle: 'Track which shops have accepted the current seller contract.',
+      onRefresh: _query.reload,
+      child: SellerQueryPanel<_ContractsData>(
+        query: _query,
+        what: 'contracts',
+        builder: (context, data) {
+          final shops = data.shops;
+          final version = data.currentVersion;
+          String statusOf(AdminShopRow shop) => _hasAccepted(shop, version) ? 'accepted' : 'missing';
+          final visible = applyStatusFilter(_filters, _filter, shops, statusOf);
+          final shown = math.min(_limit, visible.length);
 
-  Widget _buildBody() {
-    if (_loading) {
-      return const LoadingView(label: 'Loading shops…');
-    }
-    if (_error != null) {
-      return ErrorView(message: "Couldn't load shops: $_error");
-    }
-
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: ListView(
-        padding: kScreenPadding,
-        children: [
-          Text('Contract compliance', style: AppTheme.display(fontSize: 26, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 4),
-          Text(
-            'Track which shops have accepted the current seller contract.',
-            style: AppTheme.body(color: AppColors.inkSoft),
-          ),
-          const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              border: Border.all(color: AppColors.border),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Contract version $_currentVersion',
-                  style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  _contractBody,
-                  style: AppTheme.body(color: AppColors.inkSoft, fontSize: 14),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 28),
-          Text('Shop acceptance status', style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 4),
-          Text(
-            'Whether each shop has accepted the current contract version.',
-            style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
-          ),
-          const SizedBox(height: 16),
-          if (_shops.isEmpty)
-            const EmptyState(
-              title: 'No shops yet',
-              description: 'Shops will appear here once sellers register.',
-            )
-          else
-            Container(
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                border: Border.all(color: AppColors.border),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Column(
-                children: [
-                  for (var i = 0; i < _shops.length; i++) ...[
-                    if (i > 0) const Divider(height: 1, color: AppColors.border),
-                    _ShopAcceptanceRow(shop: _shops[i], currentVersion: _currentVersion),
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              CardBox(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Semantics(
+                      header: true,
+                      child: Text(
+                        'Contract version $version',
+                        style: AppTheme.display(fontSize: 19, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(_contractBody, style: AppTheme.body(color: AppColors.inkSoft, fontSize: 14)),
                   ],
-                ],
+                ),
               ),
-            ),
-        ],
+              const SizedBox(height: 24),
+              Semantics(
+                header: true,
+                child: Text(
+                  'Shop acceptance status',
+                  style: AppTheme.display(fontSize: 18, fontWeight: FontWeight.w600),
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Whether each shop has accepted the current contract version.',
+                style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
+              ),
+              const SizedBox(height: 16),
+              if (shops.isEmpty)
+                const CardBox(
+                  child: EmptyState(
+                    title: 'No shops yet',
+                    description: 'Shops will appear here once sellers register.',
+                  ),
+                )
+              else ...[
+                FilterChipBar<String>(
+                  options: filterOptions(_filters, shops, statusOf),
+                  selected: _filter,
+                  onSelected: (value) => setState(() {
+                    _filter = value;
+                    _limit = kPageSize;
+                  }),
+                ),
+                const SizedBox(height: 16),
+                if (visible.isEmpty)
+                  const CardBox(
+                    child: EmptyState(title: 'Nothing here', description: 'No shops match this filter.'),
+                  )
+                else ...[
+                  CardBox(
+                    padding: EdgeInsets.zero,
+                    child: Column(
+                      children: [
+                        for (var i = 0; i < shown; i++) ...[
+                          if (i > 0) const Divider(height: 1, color: AppColors.border),
+                          _ShopAcceptanceRow(shop: visible[i], accepted: _hasAccepted(visible[i], version)),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  LoadMoreButton(
+                    shown: shown,
+                    total: visible.length,
+                    onPressed: () => setState(() => _limit += kPageSize),
+                  ),
+                ],
+              ],
+            ],
+          );
+        },
       ),
     );
   }
 }
 
 class _ShopAcceptanceRow extends StatelessWidget {
-  final Shop shop;
-  final String currentVersion;
-  const _ShopAcceptanceRow({required this.shop, required this.currentVersion});
+  final AdminShopRow shop;
+  final bool accepted;
+  const _ShopAcceptanceRow({required this.shop, required this.accepted});
 
   @override
   Widget build(BuildContext context) {
-    final accepted = shop.contractAcceptedAt != null && shop.contractVersion == currentVersion;
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(shop.name, style: AppTheme.display(fontSize: 16, fontWeight: FontWeight.w600)),
-                const SizedBox(height: 4),
-                Text(
-                  shop.contractVersion != null && shop.contractVersion!.isNotEmpty
-                      ? 'Version ${shop.contractVersion}'
-                      : 'No version on file',
-                  style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
+    final recorded = shop.contractVersion;
+    final acceptedAt = shop.contractAcceptedAt;
+    final detail = [
+      recorded == null ? 'No version on file' : 'Version $recorded',
+      if (acceptedAt != null) 'accepted ${formatOrderDate(acceptedAt)}',
+    ].join(' · ');
+    final name = shop.name.isEmpty ? 'Unnamed shop' : shop.name;
+
+    return Semantics(
+      container: true,
+      label: '$name. $detail. ${accepted ? 'Accepted' : 'Not accepted'}',
+      excludeSemantics: true,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTheme.display(fontSize: 16, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      detail,
+                      style: AppTheme.body(fontSize: 13, color: AppColors.inkSoft),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(width: 12),
+              StatusBadge(
+                status: accepted ? 'approved' : 'rejected',
+                label: accepted ? 'Accepted' : 'Not accepted',
+              ),
+            ],
           ),
-          const SizedBox(width: 12),
-          Text(
-            accepted ? 'Accepted' : 'Not accepted',
-            style: AppTheme.body(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: accepted ? AppColors.trust : AppColors.error,
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }

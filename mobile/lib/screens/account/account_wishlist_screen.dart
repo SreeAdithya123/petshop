@@ -37,9 +37,23 @@ class _WishlistBody extends ConsumerStatefulWidget {
   ConsumerState<_WishlistBody> createState() => _WishlistBodyState();
 }
 
-class _WishlistBodyState extends ConsumerState<_WishlistBody> {
+class _WishlistBodyState extends ConsumerState<_WishlistBody> with AccountRefreshMixin<_WishlistBody> {
   Set<String> _removing = {};
   String? _removeError;
+
+  /// Pull-to-refresh: reload the saved ids and the catalog they are matched against.
+  @override
+  Future<void> refreshAccountData() async {
+    final saved = ref.read(wishlistControllerProvider).load();
+    ref.invalidate(catalogProvider);
+    final catalog = ref.read(catalogProvider.future);
+    try {
+      await catalog;
+    } catch (_) {
+      // The error state below explains it and offers a retry.
+    }
+    await saved;
+  }
 
   Future<void> _remove(List<String> ids) async {
     final controller = ref.read(wishlistControllerProvider);
@@ -82,7 +96,8 @@ class _WishlistBodyState extends ConsumerState<_WishlistBody> {
       }
       return const AccountLoadingNote();
     }
-    if (wishlist.loading) return const AccountLoadingNote();
+    // Only the first load shows placeholders; a refresh keeps the list in place.
+    if (wishlist.loading && wishlist.petIds.isEmpty) return const AccountLoadingNote();
 
     final catalog = catalogAsync.requireValue;
     final petIds = wishlist.petIds.toList();
@@ -201,6 +216,8 @@ class _WishlistPetCard extends StatelessWidget {
                   child: PetPhotoView(
                     src: pet.photoUrls.isNotEmpty ? pet.photoUrls.first : null,
                     species: pet.species,
+                    cacheWidth: 120,
+                    semanticLabel: 'Photo of ${pet.displayName}',
                   ),
                 ),
                 Expanded(
@@ -232,7 +249,7 @@ class _WishlistPetCard extends StatelessWidget {
                         const SizedBox(height: 6),
                         Text(
                           formatPrice(pet.price),
-                          style: AppTheme.display(fontSize: 16, color: AppColors.accent),
+                          style: AppTheme.display(fontSize: 16, color: kAccountPriceColor),
                         ),
                       ],
                     ),

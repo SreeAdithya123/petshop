@@ -1,14 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/async_utils.dart' show withTimeout;
 import '../../models/models.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
 import '../../widgets/revenue_chart.dart';
+import '../../widgets/seller/seller_common.dart';
 import '../../widgets/seller_analytics/analytics_data.dart';
 import '../../widgets/seller_analytics/analytics_widgets.dart';
 import '../../widgets/seller_scaffold.dart';
 import '../../widgets/shared_widgets.dart';
+import '../../widgets/skeletons.dart';
 import '../../widgets/ui_kit.dart';
 
 const _orderStatuses = ['pending', 'paid', 'fulfilled', 'cancelled'];
@@ -79,7 +82,8 @@ class _AnalyticsViewState extends State<_AnalyticsView> {
   Future<void> _load() async {
     final token = ++_loadToken;
     try {
-      final data = await loadShopAnalytics(widget.shop.id);
+      // Several paged requests make up one load, so allow longer than a single call.
+      final data = await withTimeout(loadShopAnalytics(widget.shop.id), timeout: const Duration(seconds: 45));
       if (!mounted || token != _loadToken) return;
       setState(() {
         _data = data;
@@ -90,7 +94,7 @@ class _AnalyticsViewState extends State<_AnalyticsView> {
     } catch (e) {
       if (!mounted || token != _loadToken) return;
       setState(() {
-        _error = errorText(e);
+        _error = describeError(e);
         _loading = false;
       });
     }
@@ -133,9 +137,9 @@ class _AnalyticsViewState extends State<_AnalyticsView> {
     final summary = _summary;
 
     if (data == null || summary == null) {
-      if (_loading) return const LoadingView(label: 'Loading analytics…');
+      if (_loading) return const ListSkeleton(count: 4, itemHeight: 84);
       return AnalyticsErrorView(
-        message: "Couldn't load analytics: ${_error ?? 'Something went wrong loading your analytics.'}",
+        message: _error ?? 'Something went wrong loading your analytics.',
         onRetry: _retry,
       );
     }
@@ -155,8 +159,8 @@ class _AnalyticsViewState extends State<_AnalyticsView> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (_error != null) ...[
-          NoticeBox.error(message: "Couldn't refresh analytics: $_error"),
-          const SizedBox(height: 16),
+          SellerLoadError(what: 'analytics', message: _error!, onRetry: _retry, compact: true),
+          const SizedBox(height: 12),
         ],
         _buildStatTiles(summary),
         const SizedBox(height: 20),
