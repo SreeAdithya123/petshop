@@ -1,0 +1,17 @@
+# Release signing config. Copy this file to key.properties (git-ignored) and
+# fill in the real values. See docs/RELEASING.md.
+#
+# Create the upload keystore once (use a strong random password, and keep a
+# backup of the .jks file + these values in a password manager):
+#   keytool -genkeypair -storetype PKCS12 -keystore app/upload-keystore.jks \
+#     -alias upload -keyalg RSA -keysize 2048 -validity 10000
+#
+# Without key.properties, release builds fall back to the debug key so the
+# project still builds on other machines and CI. Such builds cannot be
+# uploaded to Google Play.
+
+storePassword=<keystore password>
+keyPassword=<key password (same as the store password for PKCS12)>
+keyAlias=upload
+# Relative to android/app/
+storeFile=upload-keystore.jks

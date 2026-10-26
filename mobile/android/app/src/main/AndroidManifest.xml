@@ -2,10 +2,17 @@
     <!-- Needed in release builds (the debug/profile manifests add it automatically):
          Supabase calls and network images. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- allowBackup=false + the two rule files keep the signed-in session and
+         the cart out of cloud backups and device transfers. usesCleartextTraffic
+         =false: every endpoint the app talks to is HTTPS. -->
     <application
         android:label="PETSTA"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -23,9 +30,25 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- Auth deep links are delivered to supabase_flutter (app_links);
+                 stop Flutter also pushing the raw URL into go_router as a route. -->
+            <meta-data
+              android:name="flutter_deeplinking_enabled"
+              android:value="false"
+              />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- Supabase auth links: io.supabase.petsta://reset-callback/ (password
+                 reset) and io.supabase.petsta://login-callback/. Both redirect URLs
+                 must also be allowed in the Supabase dashboard. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="io.supabase.petsta" android:host="reset-callback"/>
+                <data android:scheme="io.supabase.petsta" android:host="login-callback"/>
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.
@@ -48,6 +71,11 @@
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="https"/>
+        </intent>
+        <!-- url_launcher: compose an email to support. -->
+        <intent>
+            <action android:name="android.intent.action.SENDTO"/>
+            <data android:scheme="mailto"/>
         </intent>
     </queries>
 </manifest>

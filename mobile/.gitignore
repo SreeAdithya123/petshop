@@ -43,3 +43,17 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Release signing: NEVER commit these. Back the keystore up somewhere safe
+# (see docs/RELEASING.md). key.properties.example documents the format.
+/android/key.properties
+/android/app/upload-keystore.jks
+**/*.jks
+**/*.keystore
+
+# Crash dumps from the JVM / Gradle daemon
+hs_err_pid*.log
+replay_pid*.log
+
+# Dart/Flutter split-debug-info output for obfuscated release builds
+/build/symbols/

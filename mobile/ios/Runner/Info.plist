@@ -22,6 +22,30 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<!-- Auth deep links (password reset / login callback), handled by
+	     supabase_flutter through app_links. The Supabase dashboard must list
+	     io.supabase.petsta://reset-callback/ as an allowed redirect URL. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>io.supabase.petsta</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>io.supabase.petsta</string>
+			</array>
+		</dict>
+	</array>
+	<!-- The app uses only standard HTTPS and OS-provided encryption, so it is
+	     exempt from export-compliance documentation. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<!-- app_links delivers the auth links; stop Flutter also pushing the raw
+	     URL into go_router as a route. -->
+	<key>FlutterDeepLinkingEnabled</key>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
