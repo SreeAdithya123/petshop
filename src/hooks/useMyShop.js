@@ -24,7 +24,7 @@ export function useMyShop() {
     setLoading(true);
     const { data, error: queryError } = await supabase
       .from("shops")
-      .select("*")
+      .select("*, shop_private(address, phone)")
       .eq("owner_id", userId)
       .maybeSingle();
     if (queryError) setError(queryError.message);

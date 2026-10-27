@@ -40,7 +40,7 @@ export function AdminDashboard() {
         supabase.from("products").select("id", { count: "exact", head: true }),
         supabase.from("orders").select("id", { count: "exact", head: true }),
         supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "customer"),
-        supabase.from("shops").select("*").eq("status", "pending").order("created_at", { ascending: false }).limit(5),
+        supabase.from("shops").select("*, shop_private(address)").eq("status", "pending").order("created_at", { ascending: false }).limit(5),
         supabase.from("orders").select("created_at, total_amount"),
       ]);
 
@@ -101,7 +101,7 @@ export function AdminDashboard() {
               <li key={shop.id} className="flex items-center justify-between gap-4 p-4">
                 <div>
                   <div className="font-medium text-ink">{shop.name}</div>
-                  <div className="text-sm text-ink-soft">{shop.address}</div>
+                  <div className="text-sm text-ink-soft">{shop.shop_private?.address}</div>
                 </div>
                 <span className="text-sm text-ink-soft">pending</span>
               </li>

@@ -1,4 +1,5 @@
--- UNAPPLIED / UNTESTED -- review, then run in the Supabase SQL editor (or apply as a migration).
+-- APPLIED on 2026-10-26 to project pytkeurgdbhekyppfblh as migration "shop_private_contact_table"
+-- (same statements, without the begin/commit wrapper). Kept here as the source of truth.
 --
 -- Step 1 of 2: move shop contact details into a private table that only the
 -- owning shop and admins can read. This step is ADDITIVE and safe to run while

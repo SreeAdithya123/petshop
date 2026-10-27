@@ -19,7 +19,7 @@ export function AdminShops() {
     setLoading(true);
     const { data } = await supabase
       .from("shops")
-      .select("*, profiles(name,email)")
+      .select("*, profiles(name,email), shop_private(address)")
       .order("created_at", { ascending: false });
     setShops(data ?? []);
     setLoading(false);
@@ -110,7 +110,7 @@ export function AdminShops() {
                   {shop.profiles?.email ? ` · ${shop.profiles.email}` : ""}
                 </div>
                 <div className="mt-1 text-sm text-ink-soft">
-                  License {shop.license_number || "—"} · {shop.address || "No address on file"}
+                  License {shop.license_number || "—"} · {shop.shop_private?.address || "No address on file"}
                 </div>
                 <div className={`mt-2 text-sm font-medium ${STATUS_STYLES[shop.status] ?? "text-ink-soft"}`}>
                   {shop.status}

@@ -1,4 +1,6 @@
--- UNAPPLIED / UNTESTED -- DESTRUCTIVE. Do NOT run until:
+-- APPLIED on 2026-10-27 as migration "drop_shop_contact_columns" (with a re-sync + guard first).
+-- Kept for the record. The original warning follows:
+-- DESTRUCTIVE. Do NOT run until:
 --   1. docs/sql/01_shop_private.sql has been applied and verified,
 --   2. every client (web, Android, iOS) reads and writes shop contact details
 --      through public.shop_private (Flutter: lib/repositories/shop_contact_repository.dart,

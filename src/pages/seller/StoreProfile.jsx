@@ -23,8 +23,8 @@ const emptyForm = {
 function formFromShop(shop) {
   return {
     name: shop.name ?? "",
-    address: shop.address ?? "",
-    phone: shop.phone ?? "",
+    address: shop.shop_private?.address ?? "",
+    phone: shop.shop_private?.phone ?? "",
     license_number: shop.license_number ?? "",
     description: shop.description ?? "",
     banner_url: shop.banner_url ?? "",
@@ -77,21 +77,32 @@ export function SellerStoreProfile() {
     try {
       const payload = {
         name: form.name.trim(),
-        address: form.address.trim(),
-        phone: form.phone.trim(),
         license_number: form.license_number.trim(),
         description: form.description.trim() || null,
         banner_url: form.banner_url.trim() || null,
       };
+      // Address and phone are private: they live in shop_private, which only
+      // this shop's owner and admins can read.
+      const contact = { address: form.address.trim(), phone: form.phone.trim() };
 
+      let shopId = shop?.id;
       if (shop) {
         const { error } = await supabase.from("shops").update(payload).eq("id", shop.id);
         if (error) throw error;
-        setSaved(true);
       } else {
-        const { error } = await supabase.from("shops").insert({ ...payload, owner_id: userId });
+        const { data, error } = await supabase
+          .from("shops")
+          .insert({ ...payload, owner_id: userId })
+          .select("id")
+          .single();
         if (error) throw error;
+        shopId = data.id;
       }
+      const { error: contactError } = await supabase
+        .from("shop_private")
+        .upsert({ shop_id: shopId, ...contact }, { onConflict: "shop_id" });
+      if (contactError) throw contactError;
+      if (shop) setSaved(true);
       await refetch();
     } catch (submitError) {
       setFormError(submitError.message || "Something went wrong saving your shop profile.");
@@ -114,7 +125,7 @@ export function SellerStoreProfile() {
         <h1 className="font-display text-3xl font-bold text-ink">{shop ? "Shop profile" : "Set up your shop"}</h1>
         <p className="mt-2 text-[15px] text-ink-soft">
           {shop
-            ? "Keep your shop's details up to date. Customers see this information across PETSTA."
+            ? "Keep your shop's details up to date. Customers see your shop's name, description and license; your address and phone stay private."
             : "Tell us about your shop. An admin will review and approve it before it goes live."}
         </p>
 

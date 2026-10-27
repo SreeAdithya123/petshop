@@ -31,7 +31,7 @@ Both apps talk to the database **only** through PostgREST with the user's JWT, s
 ## Tables used by the apps
 
 - `profiles(id, role, name, phone, email, avatar_url, created_at)`
-- `shops(id, name, address, phone, license_number, owner_id, description, banner_url, status, contract_version, contract_accepted_at, lat, lng, hours jsonb, video_call_enabled, created_at)`
+- `shops(id, name, license_number, owner_id, description, banner_url, status, contract_version, contract_accepted_at, hours jsonb, video_call_enabled, created_at)` and private `shop_private(shop_id, address, phone, lat, lng, updated_at)`
 - `pets(id, shop_id, name, gender, species, breed, age_months, price, description, photo_urls[], status, certification, listing_type, cost_price, created_at)`
 - `products(id, shop_id, category, name, description, price, stock_quantity, photo_urls[], status, requires_prescription, cost_price, created_at)`
 - `services(id, shop_id, category, name, description, price, duration_minutes, photo_urls[], status, created_at)`
@@ -51,7 +51,7 @@ Both apps talk to the database **only** through PostgREST with the user's JWT, s
 ## Privacy rules enforced today (UI + query shape only)
 
 - Customer-facing queries select explicit column lists (`lib/data/columns.dart`, `src/lib/columns.js`) and embed `shops(name)` only. **They never request `shops.address`, `shops.phone`, `pets.cost_price` or `products.cost_price`.**
-- **Gap:** RLS cannot hide columns, so anyone who calls the REST API directly can still read `shops.address/phone/lat/lng` of approved shops and `cost_price` of available pets/products. See "Pending database work".
+- **Shop contact details are now enforced in the database:** `shops.address/phone/lat/lng` were moved to `shop_private` (readable and writable only by the owning shop and admins) and dropped from `shops` on 2026-10-27. `pets.cost_price` / `products.cost_price` are still readable through the API by anyone who can read the pet/product (see pending work).
 
 ## RLS and trigger behaviour the apps depend on
 
@@ -74,15 +74,24 @@ Helper functions (SECURITY DEFINER): `is_admin()`, `owns_shop(shop_id)`, `owns_o
 | `place_pet_gift(p_pet_id, p_recipient_name, p_recipient_contact, p_message) → uuid` | Creates a `gift` order + `gifts` row; the pet becomes reserved. |
 | `order_items_detailed(p_order_id) → table(order_item_id, item_type, item_id, quantity, price_at_purchase, label, shop_id, shop_name)` | For an order the caller owns. |
 
-## Pending database work (not applied — needs Supabase access)
+## Database changes applied on 2026-10-26/27
 
-The Flutter app already calls the functions below and degrades gracefully ("This action isn't available yet") until they exist. **Read `place_pet_order` and `place_pet_gift` first** (`select pg_get_functiondef('public.place_pet_order(uuid[])'::regprocedure);`) — the lifecycle functions must mirror what they write (orders, order_items, reservations, pets).
+Migrations (see `docs/sql/` for the statements): `shop_private_contact_table`, `drop_shop_contact_columns`, `order_lifecycle_and_account_deletion`, `order_hold_helper`, `release_order_pets_newer_orders_only`.
 
-1. **Order lifecycle (biggest functional gap).**
-   - `seller_update_order_status(p_order_id uuid, p_status text) → void` — SECURITY DEFINER; caller must own a shop with an item on the order (or be admin). Allowed: `pending→paid`, `paid→fulfilled`, `pending|paid→cancelled`. `fulfilled` marks the order's reserved pets `sold` (and confirms their reservation); `cancelled` returns reserved pets to `available` (and cancels the reservation, restoring product stock if stock was decremented). Decide how multi-shop orders behave (a cart can span shops): either split orders per shop in `place_pet_order`, or apply the status per shop's items and derive the order status.
-   - `cancel_my_order(p_order_id uuid) → void` — the customer's own order while `pending`; same release behaviour.
-   - **Reservation expiry:** a scheduled job (pg_cron) that cancels `pending` reservations/orders older than N hours so abandoned carts cannot lock pets forever, plus a cap on simultaneous pending orders per customer.
-2. **Account deletion (App Store guideline 5.1.1(v) requires it):** `delete_my_account() → void`. Remove or anonymise personal data (wishlists, addresses, tickets, profile name/phone/email) and delete the auth user; orders must survive for the shop's records, so if foreign keys block deleting the auth user, anonymise the profile and ban the auth user instead. Shop owners should be told to contact support.
-3. **Shop contact privacy (user-approved, not yet applied):** run `docs/sql/01_shop_private.sql` (additive), then switch `ShopContactRepository` (Flutter) and the web seller/admin shop screens to read/write `shop_private`, then run `docs/sql/02_drop_shop_contact_columns.sql`. Consider the same treatment for `cost_price` (a `pet_costs` / `product_costs` table readable only by the owning shop).
-4. **Indexes:** re-run the Supabase performance advisor after the above and add covering indexes for any unindexed foreign keys.
-5. **Auth settings (dashboard, not SQL):** enable leaked-password protection; add `io.supabase.petsta://reset-callback/` and `io.supabase.petsta://login-callback/` to the allowed redirect URLs and set the Site URL; configure custom SMTP (the built-in mailer is heavily rate-limited); enable backups (a paid plan).
+- **Shop contact privacy:** `shop_private` table with RLS (owner of the shop + admin only); public columns dropped.
+- **`place_pet_order(uuid[])`:** now creates **one order per shop** (returns the first order's id; the others appear in My orders), caps a customer at 5 orders that currently hold a reserved pet, writes `order_status_history`.
+- **`place_pet_gift(...)`:** same hold cap and history.
+- **`seller_update_order_status(order, status)`:** shop owner of an order whose items are *all* theirs, or admin. `pending→paid|cancelled`, `paid→fulfilled|cancelled`. `fulfilled` marks reserved pets sold (and gifts delivered); `cancelled` returns pets to `available`; refuses to progress an order whose pet was already put back on sale.
+- **`cancel_my_order(order)`:** the customer's own order while `pending`.
+- **`expire_stale_pet_orders(interval)`** (internal, cron every 30 min as `expire-stale-pet-orders`): cancels `pending` reservation/gift orders older than 48 h that still genuinely hold a reserved pet and have sold nothing. It ignores old stale orders whose pet was re-reserved by someone else.
+- **`delete_my_account()`:** customers only. No history → the auth user (and everything cascading from it) is deleted. With orders / bookings / refunds / reservations → the profile is anonymised, sign-in is disabled and the shops' records are kept.
+- Internal helpers `release_order_pets`, `order_holds_reserved_pet` are not callable through the API.
+- All of the above was tested as real users (customer, both shop owners, admin, anon) inside rolled-back transactions.
+
+## Still to do (database)
+
+1. **`cost_price` leak:** `pets.cost_price` and `products.cost_price` can be read through the API by anyone who can read the pet/product. Move them to owner-only tables (`pet_costs`, `product_costs`) the same way as `shop_private`, then update the seller screens (web + Flutter).
+2. **Product stock:** product orders are inserted directly by the client and never change `stock_quantity`; decide whether stock should drop when an order is marked paid/fulfilled.
+3. **Notifications:** the `notifications` table exists; writing a row on every order/booking/demo status change would give both apps an in-app feed and is the basis for push notifications.
+4. **Auth settings (dashboard, not SQL):** enable leaked-password protection; add `io.supabase.petsta://reset-callback/` and `io.supabase.petsta://login-callback/` to the allowed redirect URLs and set the Site URL; configure custom SMTP (the built-in mailer is heavily rate-limited); enable backups (a paid plan).
+5. **Indexes:** re-run the Supabase performance advisor and add covering indexes for any unindexed foreign keys.
