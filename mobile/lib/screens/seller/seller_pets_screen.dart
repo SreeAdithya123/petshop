@@ -6,18 +6,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../models/models.dart';
+import '../../services/photo_upload.dart';
 import '../../services/supabase_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
 import '../../widgets/pet_widgets.dart';
+import '../../widgets/photos/photo_picker_field.dart';
 import '../../widgets/seller/seller_common.dart';
 import '../../widgets/seller_scaffold.dart';
 import '../../widgets/shared_widgets.dart';
 import '../../widgets/ui_kit.dart';
 
 /// Ports src/pages/seller/Pets.jsx: a shop owner's own pet listings with an
-/// Add / Edit form (name, gender, species, breed, age, price...) in a bottom
-/// sheet and per-row Mark sold / Mark available / Edit / Delete actions.
+/// Add / Edit form (name, gender, species, breed, age, price, photos...) in a
+/// bottom sheet and per-row Mark sold / Mark available / Edit / Delete actions.
 class SellerPetsScreen extends StatelessWidget {
   const SellerPetsScreen({super.key});
 
@@ -373,7 +375,8 @@ class _PetFormState extends State<_PetForm> {
   late final TextEditingController _age;
   late final TextEditingController _price;
   late final TextEditingController _description;
-  late final TextEditingController _photos;
+  late final ListingPhotoTracker _photoTracker;
+  late List<String> _photoUrls;
   late String _gender; // '' = Unknown (stored as null)
 
   String? _nameError;
@@ -381,9 +384,9 @@ class _PetFormState extends State<_PetForm> {
   String? _breedError;
   String? _ageError;
   String? _priceError;
-  String? _photosError;
   String? _formError;
   bool _submitting = false;
+  bool _photosBusy = false;
 
   bool get _editing => widget.pet != null;
 
@@ -397,20 +400,22 @@ class _PetFormState extends State<_PetForm> {
     _age = TextEditingController(text: pet == null ? '' : '${pet.ageMonths}');
     _price = TextEditingController(text: pet == null ? '' : plainNumber(pet.price));
     _description = TextEditingController(text: pet?.description ?? '');
-    _photos = TextEditingController(text: pet?.photoUrls.join(', ') ?? '');
+    _photoUrls = List<String>.of(pet?.photoUrls ?? const <String>[]);
+    _photoTracker = ListingPhotoTracker(_photoUrls);
     final gender = pet?.gender;
     _gender = (gender == 'Male' || gender == 'Female') ? gender! : '';
   }
 
   @override
   void dispose() {
+    // Closed without saving: photos uploaded during this edit are not needed.
+    _photoTracker.discard(_photoUrls);
     _name.dispose();
     _species.dispose();
     _breed.dispose();
     _age.dispose();
     _price.dispose();
     _description.dispose();
-    _photos.dispose();
     super.dispose();
   }
 
@@ -441,31 +446,24 @@ class _PetFormState extends State<_PetForm> {
       priceError = 'Price must be greater than zero.';
     }
 
-    final photosError = photoUrlsError(_photos.text);
-
     setState(() {
       _nameError = nameError;
       _speciesError = speciesError;
       _breedError = breedError;
       _ageError = ageError;
       _priceError = priceError;
-      _photosError = photosError;
     });
-    return nameError == null &&
-        speciesError == null &&
-        breedError == null &&
-        ageError == null &&
-        priceError == null &&
-        photosError == null;
+    return nameError == null && speciesError == null && breedError == null && ageError == null && priceError == null;
   }
 
   Future<void> _submit() async {
-    if (_submitting) return;
+    if (_submitting || _photosBusy) return;
     FocusScope.of(context).unfocus();
     setState(() => _formError = null);
     if (!_validate()) return;
 
     final description = _description.text.trim();
+    final photoUrls = List<String>.of(_photoUrls);
     final payload = <String, dynamic>{
       'name': _name.text.trim(),
       'gender': _gender.isEmpty ? null : _gender,
@@ -474,10 +472,11 @@ class _PetFormState extends State<_PetForm> {
       'age_months': int.parse(_age.text.trim()),
       'price': parseAmount(_price.text)!,
       'description': description.isEmpty ? null : description,
-      'photo_urls': parseUrlList(_photos.text),
+      'photo_urls': photoUrls,
     };
 
     setState(() => _submitting = true);
+    _photoTracker.saveStarted();
     final pet = widget.pet;
     // The database forces the shop, status and any seller-protected columns.
     final failure = pet == null
@@ -492,6 +491,7 @@ class _PetFormState extends State<_PetForm> {
       });
       return;
     }
+    _photoTracker.saveSucceeded(photoUrls);
     Navigator.of(context).pop(true);
   }
 
@@ -570,18 +570,14 @@ class _PetFormState extends State<_PetForm> {
             decoration: const InputDecoration(labelText: 'Description', alignLabelWithHint: true),
           ),
           const SizedBox(height: 14),
-          TextField(
-            controller: _photos,
+          PhotoPickerField(
+            shopId: widget.shopId,
+            kind: 'pets',
+            label: 'Photos',
+            urls: _photoUrls,
             enabled: enabled,
-            keyboardType: TextInputType.url,
-            autocorrect: false,
-            decoration: InputDecoration(
-              labelText: 'Photo URLs',
-              hintText: 'https://example.com/photo1.jpg, https://example.com/photo2.jpg',
-              helperText: 'Separate multiple links with commas.',
-              errorText: _photosError,
-              errorMaxLines: 2,
-            ),
+            onChanged: (urls) => setState(() => _photoUrls = urls),
+            onBusyChanged: (busy) => setState(() => _photosBusy = busy),
           ),
           if (_formError != null) ...[
             const SizedBox(height: 14),
@@ -592,7 +588,7 @@ class _PetFormState extends State<_PetForm> {
             label: _editing ? 'Save changes' : 'Add pet',
             loading: _submitting,
             expand: true,
-            onPressed: _submit,
+            onPressed: _photosBusy ? null : _submit,
           ),
         ],
       ),

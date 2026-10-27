@@ -5,10 +5,12 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/models.dart';
+import '../../services/photo_upload.dart';
 import '../../services/supabase_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
 import '../../widgets/pet_widgets.dart';
+import '../../widgets/photos/photo_picker_field.dart';
 import '../../widgets/seller/seller_common.dart';
 import '../../widgets/seller_scaffold.dart';
 import '../../widgets/shared_widgets.dart';
@@ -329,15 +331,16 @@ class _ProductFormState extends State<_ProductForm> {
   late final TextEditingController _price;
   late final TextEditingController _stock;
   late final TextEditingController _description;
-  late final TextEditingController _photos;
+  late final ListingPhotoTracker _photoTracker;
+  late List<String> _photoUrls;
   late String _category;
 
   String? _nameError;
   String? _priceError;
   String? _stockError;
-  String? _photosError;
   String? _formError;
   bool _submitting = false;
+  bool _photosBusy = false;
 
   bool get _editing => widget.product != null;
 
@@ -349,17 +352,19 @@ class _ProductFormState extends State<_ProductForm> {
     _price = TextEditingController(text: product == null ? '' : plainNumber(product.price));
     _stock = TextEditingController(text: product == null ? '' : '${product.stockQuantity}');
     _description = TextEditingController(text: product?.description ?? '');
-    _photos = TextEditingController(text: product?.photoUrls.join(', ') ?? '');
+    _photoUrls = List<String>.of(product?.photoUrls ?? const <String>[]);
+    _photoTracker = ListingPhotoTracker(_photoUrls);
     _category = (product != null && _categoryLabels.containsKey(product.category)) ? product.category : 'medicine';
   }
 
   @override
   void dispose() {
+    // Closed without saving: photos uploaded during this edit are not needed.
+    _photoTracker.discard(_photoUrls);
     _name.dispose();
     _price.dispose();
     _stock.dispose();
     _description.dispose();
-    _photos.dispose();
     super.dispose();
   }
 
@@ -386,34 +391,33 @@ class _ProductFormState extends State<_ProductForm> {
       stockError = 'Enter a whole number, like 12.';
     }
 
-    final photosError = photoUrlsError(_photos.text);
-
     setState(() {
       _nameError = nameError;
       _priceError = priceError;
       _stockError = stockError;
-      _photosError = photosError;
     });
-    return nameError == null && priceError == null && stockError == null && photosError == null;
+    return nameError == null && priceError == null && stockError == null;
   }
 
   Future<void> _submit() async {
-    if (_submitting) return;
+    if (_submitting || _photosBusy) return;
     FocusScope.of(context).unfocus();
     setState(() => _formError = null);
     if (!_validate()) return;
 
     final description = _description.text.trim();
+    final photoUrls = List<String>.of(_photoUrls);
     final payload = <String, dynamic>{
       'category': _category,
       'name': _name.text.trim(),
       'description': description.isEmpty ? null : description,
       'price': parseAmount(_price.text)!,
       'stock_quantity': int.parse(_stock.text.trim()),
-      'photo_urls': parseUrlList(_photos.text),
+      'photo_urls': photoUrls,
     };
 
     setState(() => _submitting = true);
+    _photoTracker.saveStarted();
     final product = widget.product;
     final failure = product == null
         ? await insertRow('products', {'shop_id': widget.shopId, ...payload})
@@ -427,6 +431,7 @@ class _ProductFormState extends State<_ProductForm> {
       });
       return;
     }
+    _photoTracker.saveSucceeded(photoUrls);
     Navigator.of(context).pop(true);
   }
 
@@ -488,18 +493,14 @@ class _ProductFormState extends State<_ProductForm> {
             decoration: const InputDecoration(labelText: 'Description', alignLabelWithHint: true),
           ),
           const SizedBox(height: 14),
-          TextField(
-            controller: _photos,
+          PhotoPickerField(
+            shopId: widget.shopId,
+            kind: 'products',
+            label: 'Photos',
+            urls: _photoUrls,
             enabled: enabled,
-            keyboardType: TextInputType.url,
-            autocorrect: false,
-            decoration: InputDecoration(
-              labelText: 'Photo URLs',
-              hintText: 'https://example.com/photo1.jpg, https://example.com/photo2.jpg',
-              helperText: 'Separate multiple links with commas.',
-              errorText: _photosError,
-              errorMaxLines: 2,
-            ),
+            onChanged: (urls) => setState(() => _photoUrls = urls),
+            onBusyChanged: (busy) => setState(() => _photosBusy = busy),
           ),
           if (_formError != null) ...[
             const SizedBox(height: 14),
@@ -510,7 +511,7 @@ class _ProductFormState extends State<_ProductForm> {
             label: _editing ? 'Save changes' : 'Add product',
             loading: _submitting,
             expand: true,
-            onPressed: _submit,
+            onPressed: _photosBusy ? null : _submit,
           ),
         ],
       ),

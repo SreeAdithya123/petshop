@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 
 import '../../data/service_categories.dart';
 import '../../models/service_models.dart';
+import '../../services/photo_upload.dart';
+import '../photos/photo_picker_field.dart';
 import '../ui_kit.dart';
 import 'seller_common.dart';
 
@@ -41,6 +43,8 @@ class _ServiceFormState extends State<_ServiceForm> {
   late final TextEditingController _price;
   late final TextEditingController _duration;
   late final TextEditingController _description;
+  late final ListingPhotoTracker _photoTracker;
+  late List<String> _photoUrls;
   late String _category;
 
   String? _nameError;
@@ -48,6 +52,7 @@ class _ServiceFormState extends State<_ServiceForm> {
   String? _durationError;
   String? _formError;
   bool _submitting = false;
+  bool _photosBusy = false;
 
   bool get _editing => widget.service != null;
 
@@ -59,6 +64,8 @@ class _ServiceFormState extends State<_ServiceForm> {
     _price = TextEditingController(text: service == null ? '' : _numberText(service.price));
     _duration = TextEditingController(text: service?.durationMinutes?.toString() ?? '');
     _description = TextEditingController(text: service?.description ?? '');
+    _photoUrls = List<String>.of(service?.photoUrls ?? const <String>[]);
+    _photoTracker = ListingPhotoTracker(_photoUrls);
     _category = (service != null && serviceCategories.any((category) => category.key == service.category))
         ? service.category
         : serviceCategories.first.key;
@@ -66,6 +73,8 @@ class _ServiceFormState extends State<_ServiceForm> {
 
   @override
   void dispose() {
+    // Closed without saving: photos uploaded during this edit are not needed.
+    _photoTracker.discard(_photoUrls);
     _name.dispose();
     _price.dispose();
     _duration.dispose();
@@ -106,12 +115,14 @@ class _ServiceFormState extends State<_ServiceForm> {
   }
 
   Future<void> _submit() async {
-    if (_submitting) return;
+    if (_submitting || _photosBusy) return;
     FocusScope.of(context).unfocus();
     setState(() => _formError = null);
     if (!_validate()) return;
 
     setState(() => _submitting = true);
+    _photoTracker.saveStarted();
+    final photoUrls = List<String>.of(_photoUrls);
     final durationText = _duration.text.trim();
     // Never send `status`: the database forces new services to "pending" and
     // blocks sellers from changing it.
@@ -121,6 +132,7 @@ class _ServiceFormState extends State<_ServiceForm> {
       'description': _description.text.trim(),
       'price': double.parse(_price.text.trim()),
       'duration_minutes': durationText.isEmpty ? null : int.parse(durationText),
+      'photo_urls': photoUrls,
     };
 
     final existing = widget.service;
@@ -137,6 +149,7 @@ class _ServiceFormState extends State<_ServiceForm> {
       return;
     }
 
+    _photoTracker.saveSucceeded(photoUrls);
     widget.onSaved(_editing ? 'Service updated.' : 'Service submitted. New services go live after admin approval.');
     if (mounted) Navigator.of(context).pop();
   }
@@ -200,6 +213,16 @@ class _ServiceFormState extends State<_ServiceForm> {
             textCapitalization: TextCapitalization.sentences,
             decoration: const InputDecoration(labelText: 'Description (optional)', alignLabelWithHint: true),
           ),
+          const SizedBox(height: 16),
+          PhotoPickerField(
+            shopId: widget.shopId,
+            kind: 'services',
+            label: 'Photos (optional)',
+            urls: _photoUrls,
+            enabled: enabled,
+            onChanged: (urls) => setState(() => _photoUrls = urls),
+            onBusyChanged: (busy) => setState(() => _photosBusy = busy),
+          ),
           if (_formError != null) ...[
             const SizedBox(height: 16),
             NoticeBox.error(message: _formError!),
@@ -218,7 +241,7 @@ class _ServiceFormState extends State<_ServiceForm> {
                 child: LoadingButton(
                   label: _editing ? 'Save changes' : 'Add service',
                   loading: _submitting,
-                  onPressed: _submit,
+                  onPressed: _photosBusy ? null : _submit,
                   expand: true,
                 ),
               ),

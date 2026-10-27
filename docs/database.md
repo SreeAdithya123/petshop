@@ -32,8 +32,8 @@ Both apps talk to the database **only** through PostgREST with the user's JWT, s
 
 - `profiles(id, role, name, phone, email, avatar_url, created_at)`
 - `shops(id, name, license_number, owner_id, description, banner_url, status, contract_version, contract_accepted_at, hours jsonb, video_call_enabled, created_at)` and private `shop_private(shop_id, address, phone, lat, lng, updated_at)`
-- `pets(id, shop_id, name, gender, species, breed, age_months, price, description, photo_urls[], status, certification, listing_type, cost_price, created_at)`
-- `products(id, shop_id, category, name, description, price, stock_quantity, photo_urls[], status, requires_prescription, cost_price, created_at)`
+- `pets(id, shop_id, name, gender, species, breed, age_months, price, description, photo_urls[], status, certification, listing_type, created_at)`
+- `products(id, shop_id, category, name, description, price, stock_quantity, photo_urls[], status, requires_prescription, created_at)`
 - `services(id, shop_id, category, name, description, price, duration_minutes, photo_urls[], status, created_at)`
 - `service_bookings(id, service_id, shop_id, customer_id, pet_id, provider_id, booking_date, booking_time, delivery_mode, video_room_url, status, price_at_booking, order_id, notes, created_at, service_name, service_category, shop_name)`
 - `custom_service_requests(id, customer_id, title, description, category, pet_name, pet_species, preferred_date, budget, status, shop_id, shop_name, quoted_price, response_message, responded_at, created_at, updated_at)`
@@ -51,7 +51,7 @@ Both apps talk to the database **only** through PostgREST with the user's JWT, s
 ## Privacy rules enforced today (UI + query shape only)
 
 - Customer-facing queries select explicit column lists (`lib/data/columns.dart`, `src/lib/columns.js`) and embed `shops(name)` only. **They never request `shops.address`, `shops.phone`, `pets.cost_price` or `products.cost_price`.**
-- **Shop contact details are now enforced in the database:** `shops.address/phone/lat/lng` were moved to `shop_private` (readable and writable only by the owning shop and admins) and dropped from `shops` on 2026-10-27. `pets.cost_price` / `products.cost_price` are still readable through the API by anyone who can read the pet/product (see pending work).
+- **Shop contact details are now enforced in the database:** `shops.address/phone/lat/lng` were moved to `shop_private` (readable and writable only by the owning shop and admins) and dropped from `shops` on 2026-10-27. `cost_price` was removed from `pets` and `products` (it was unused and empty), so seller margins cannot leak through the API.
 
 ## RLS and trigger behaviour the apps depend on
 
@@ -86,11 +86,12 @@ Migrations (see `docs/sql/` for the statements): `shop_private_contact_table`, `
 - **`expire_stale_pet_orders(interval)`** (internal, cron every 30 min as `expire-stale-pet-orders`): cancels `pending` reservation/gift orders older than 48 h that still genuinely hold a reserved pet and have sold nothing. It ignores old stale orders whose pet was re-reserved by someone else.
 - **`delete_my_account()`:** customers only. No history → the auth user (and everything cascading from it) is deleted. With orders / bookings / refunds / reservations → the profile is anonymised, sign-in is disabled and the shops' records are kept.
 - Internal helpers `release_order_pets`, `order_holds_reserved_pet` are not callable through the API.
+- **Photo storage:** public bucket `listing-photos` (5 MB, jpeg/png/webp); only the owning shop or an admin can upload/replace/delete inside `<shop_id>/…` (policies + `can_manage_listing_photo`, see `docs/sql/04_listing_photos.sql`).
 - All of the above was tested as real users (customer, both shop owners, admin, anon) inside rolled-back transactions.
 
 ## Still to do (database)
 
-1. **`cost_price` leak:** `pets.cost_price` and `products.cost_price` can be read through the API by anyone who can read the pet/product. Move them to owner-only tables (`pet_costs`, `product_costs`) the same way as `shop_private`, then update the seller screens (web + Flutter).
+1. ~~cost_price leak~~ — done (columns removed 2026-10-27).
 2. **Product stock:** product orders are inserted directly by the client and never change `stock_quantity`; decide whether stock should drop when an order is marked paid/fulfilled.
 3. **Notifications:** the `notifications` table exists; writing a row on every order/booking/demo status change would give both apps an in-app feed and is the basis for push notifications.
 4. **Auth settings (dashboard, not SQL):** enable leaked-password protection; add `io.supabase.petsta://reset-callback/` and `io.supabase.petsta://login-callback/` to the allowed redirect URLs and set the Site URL; configure custom SMTP (the built-in mailer is heavily rate-limited); enable backups (a paid plan).

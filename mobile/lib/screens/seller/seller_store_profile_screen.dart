@@ -5,11 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/async_utils.dart' show withTimeout;
 import '../../models/models.dart';
 import '../../repositories/shop_contact_repository.dart';
+import '../../services/photo_upload.dart';
 import '../../state/auth_provider.dart';
 import '../../state/my_shop_provider.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/format.dart';
 import '../../widgets/content_width.dart';
+import '../../widgets/photos/photo_picker_field.dart';
 import '../../widgets/role_shell.dart';
 import '../../widgets/seller/seller_common.dart';
 import '../../widgets/shared_widgets.dart';
@@ -119,15 +121,18 @@ class _StoreFormState extends ConsumerState<_StoreForm> {
   late final TextEditingController _phone = TextEditingController();
   late final TextEditingController _license = TextEditingController(text: widget.shop?.licenseNumber ?? '');
   late final TextEditingController _description = TextEditingController(text: widget.shop?.description ?? '');
-  late final TextEditingController _banner = TextEditingController(text: widget.shop?.bannerUrl ?? '');
+
+  /// The banner is a list of zero or one URL so it can use [PhotoPickerField].
+  late List<String> _bannerUrls;
+  late final ListingPhotoTracker _photoTracker;
 
   String? _nameError;
   String? _addressError;
   String? _phoneError;
   String? _licenseError;
-  String? _bannerError;
   String? _formError;
   bool _submitting = false;
+  bool _bannerBusy = false;
 
   /// Address and phone arrive separately (they are private): the fields stay
   /// locked until they have loaded so a save can never overwrite them blind.
@@ -140,6 +145,9 @@ class _StoreFormState extends ConsumerState<_StoreForm> {
   @override
   void initState() {
     super.initState();
+    final banner = (widget.shop?.bannerUrl ?? '').trim();
+    _bannerUrls = banner.isEmpty ? <String>[] : <String>[banner];
+    _photoTracker = ListingPhotoTracker(_bannerUrls);
     if (_exists) {
       _contactReady = false;
       _contactLoading = true;
@@ -149,12 +157,13 @@ class _StoreFormState extends ConsumerState<_StoreForm> {
 
   @override
   void dispose() {
+    // Left without saving: a banner uploaded meanwhile is not needed.
+    _photoTracker.discard(_bannerUrls);
     _name.dispose();
     _address.dispose();
     _phone.dispose();
     _license.dispose();
     _description.dispose();
-    _banner.dispose();
     super.dispose();
   }
 
@@ -192,7 +201,6 @@ class _StoreFormState extends ConsumerState<_StoreForm> {
     String? addressError;
     String? phoneError;
     String? licenseError;
-    String? bannerError;
 
     if (_name.text.trim().isEmpty) nameError = "Enter your shop's name.";
     if (_address.text.trim().isEmpty) addressError = "Enter your shop's address.";
@@ -207,31 +215,23 @@ class _StoreFormState extends ConsumerState<_StoreForm> {
 
     if (_license.text.trim().isEmpty) licenseError = 'Enter your license number.';
 
-    final banner = _banner.text.trim();
-    if (banner.isNotEmpty && !isHttpsUrl(banner)) bannerError = 'The banner link must start with https://';
-
     setState(() {
       _nameError = nameError;
       _addressError = addressError;
       _phoneError = phoneError;
       _licenseError = licenseError;
-      _bannerError = bannerError;
     });
-    return nameError == null &&
-        addressError == null &&
-        phoneError == null &&
-        licenseError == null &&
-        bannerError == null;
+    return nameError == null && addressError == null && phoneError == null && licenseError == null;
   }
 
   Future<void> _submit() async {
-    if (_submitting || !_contactReady) return;
+    if (_submitting || !_contactReady || _bannerBusy) return;
     FocusScope.of(context).unfocus();
     setState(() => _formError = null);
     if (!_validate()) return;
 
     final description = _description.text.trim();
-    final banner = _banner.text.trim();
+    final bannerUrls = List<String>.of(_bannerUrls);
     final address = _address.text.trim();
     final phone = _phone.text.trim();
     // Public shop columns only. The status is never sent: the database forces
@@ -240,7 +240,7 @@ class _StoreFormState extends ConsumerState<_StoreForm> {
       'name': _name.text.trim(),
       'license_number': _license.text.trim(),
       'description': description.isEmpty ? null : description,
-      'banner_url': banner.isEmpty ? null : banner,
+      'banner_url': bannerUrls.isEmpty ? null : bannerUrls.first,
     };
 
     final shop = widget.shop;
@@ -251,6 +251,7 @@ class _StoreFormState extends ConsumerState<_StoreForm> {
     }
 
     setState(() => _submitting = true);
+    _photoTracker.saveStarted();
     String? failure;
     if (shop == null) {
       try {
@@ -281,6 +282,7 @@ class _StoreFormState extends ConsumerState<_StoreForm> {
     });
     if (failure != null) return;
 
+    _photoTracker.saveSucceeded(bannerUrls);
     showSnack(
       context,
       shop == null ? 'Shop submitted. An admin will review it soon.' : 'Shop details saved.',
@@ -417,18 +419,22 @@ class _StoreFormState extends ConsumerState<_StoreForm> {
           decoration: const InputDecoration(labelText: 'Description (optional)', alignLabelWithHint: true),
         ),
         const SizedBox(height: 16),
-        TextField(
-          controller: _banner,
-          enabled: enabled,
-          keyboardType: TextInputType.url,
-          autocorrect: false,
-          decoration: InputDecoration(
-            labelText: 'Banner image URL (optional)',
-            hintText: 'https://example.com/banner.jpg',
-            errorText: _bannerError,
-            errorMaxLines: 2,
+        if (shop != null)
+          PhotoPickerField(
+            shopId: shop.id,
+            kind: 'shop',
+            single: true,
+            label: 'Shop banner (optional)',
+            urls: _bannerUrls,
+            enabled: enabled,
+            onChanged: (urls) => setState(() => _bannerUrls = urls),
+            onBusyChanged: (busy) => setState(() => _bannerBusy = busy),
+          )
+        else
+          Text(
+            'You can add a banner after your shop is created',
+            style: AppTheme.body(fontSize: 13.5, color: AppColors.inkSoft),
           ),
-        ),
         if (_formError != null) ...[
           const SizedBox(height: 16),
           NoticeBox.error(message: _formError!),
@@ -438,7 +444,7 @@ class _StoreFormState extends ConsumerState<_StoreForm> {
           label: _exists ? 'Save changes' : 'Create shop',
           loading: _submitting,
           expand: true,
-          onPressed: _contactReady ? _submit : null,
+          onPressed: _contactReady && !_bannerBusy ? _submit : null,
         ),
       ],
     );

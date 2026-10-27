@@ -46,6 +46,12 @@
 	     URL into go_router as a route. -->
 	<key>FlutterDeepLinkingEnabled</key>
 	<false/>
+	<!-- image_picker: shop owners add photos to their listings from the camera
+	     or the photo library. -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>PETSTA uses your photos so you can add pictures to your listings.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>PETSTA uses the camera so you can photograph your listings.</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
