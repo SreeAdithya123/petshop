@@ -32,6 +32,22 @@ export function shortOrderId(id) {
   return String(id).slice(0, 8).toUpperCase();
 }
 
+/**
+ * The text to show for a failed database function call. The functions raise
+ * human-readable messages, which are shown as they are; only transport
+ * failures and a function that isn't deployed get a friendlier sentence.
+ */
+export function rpcErrorMessage(error) {
+  const message = String(error?.message ?? "").trim();
+  if (!message || /failed to fetch|networkerror|network request failed|load failed/i.test(message)) {
+    return "Couldn't reach PETSTA. Check your connection and try again.";
+  }
+  if (error?.code === "PGRST202" || /could not find the function/i.test(message)) {
+    return "This action isn't available yet. Please try again later.";
+  }
+  return message;
+}
+
 /** "14:30" / "14:30:00" -> "2:30 pm". Free-text values (e.g. "Morning") pass through. */
 export function formatTimeOfDay(value) {
   if (!value) return "";

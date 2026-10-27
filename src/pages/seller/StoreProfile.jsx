@@ -1,15 +1,19 @@
 import { useEffect, useState } from "react";
 import { Container } from "../../components/layout/Container";
 import { Button } from "../../components/ui/Button";
+import { PhotoUploader } from "../../components/ui/PhotoUploader";
 import { supabase } from "../../lib/supabaseClient";
 import { useAuthStore } from "../../store/authStore";
 import { useMyShop } from "../../hooks/useMyShop";
+import { deleteListingPhotosByUrls, removedPhotoUrls } from "../../lib/listingPhotos";
 
 function fieldClassName(hasError) {
   return `mt-1.5 w-full rounded-lg border bg-surface px-4 py-2.5 text-[15px] text-ink focus:outline-none ${
     hasError ? "border-error focus:border-error" : "border-border focus:border-primary"
   }`;
 }
+
+const NO_PHOTOS = [];
 
 const emptyForm = {
   name: "",
@@ -54,11 +58,16 @@ export function SellerStoreProfile() {
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [photosBusy, setPhotosBusy] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     if (shop) setForm(formFromShop(shop));
   }, [shop]);
+
+  // The banner is a single photo, held in the form as one URL string.
+  const savedBannerUrls = shop?.banner_url ? [shop.banner_url] : NO_PHOTOS;
+  const bannerUrls = form.banner_url ? [form.banner_url] : NO_PHOTOS;
 
   function updateField(field, value) {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -69,6 +78,10 @@ export function SellerStoreProfile() {
     event.preventDefault();
     setFormError("");
     setSaved(false);
+    if (photosBusy) {
+      setFormError("Your banner is still uploading. Save again in a moment.");
+      return;
+    }
     const validationErrors = validate(form);
     setErrors(validationErrors);
     if (Object.keys(validationErrors).length > 0) return;
@@ -89,6 +102,8 @@ export function SellerStoreProfile() {
       if (shop) {
         const { error } = await supabase.from("shops").update(payload).eq("id", shop.id);
         if (error) throw error;
+        // A replaced or removed banner is no longer referenced by the shop.
+        deleteListingPhotosByUrls(removedPhotoUrls(savedBannerUrls, payload.banner_url ? [payload.banner_url] : []));
       } else {
         const { data, error } = await supabase
           .from("shops")
@@ -218,18 +233,26 @@ export function SellerStoreProfile() {
             />
           </div>
 
-          <div>
-            <label htmlFor="banner_url" className="block text-sm text-ink">
-              Banner image URL
-            </label>
-            <input
-              id="banner_url"
-              type="url"
-              value={form.banner_url}
-              onChange={(event) => updateField("banner_url", event.target.value)}
-              className={fieldClassName(false)}
+          {shop ? (
+            <PhotoUploader
+              single
+              shopId={shop.id}
+              kind="shop"
+              label="Banner image"
+              urls={bannerUrls}
+              savedUrls={savedBannerUrls}
+              onChange={(next) => updateField("banner_url", next[0] ?? "")}
+              onBusyChange={setPhotosBusy}
+              disabled={submitting}
             />
-          </div>
+          ) : (
+            <div>
+              <p className="text-sm text-ink">Banner image</p>
+              <p className="mt-1.5 text-xs text-ink-soft">
+                You can add a banner image once your shop has been created. Create your shop first, then come back to this page.
+              </p>
+            </div>
+          )}
 
           {formError && <p className="text-sm text-error">{formError}</p>}
           {saved && (
@@ -241,8 +264,8 @@ export function SellerStoreProfile() {
             </p>
           )}
 
-          <Button type="submit" variant="accent" size="lg" disabled={submitting} className="mt-2 w-full sm:w-auto">
-            {submitting ? "Saving…" : shop ? "Save changes" : "Create shop"}
+          <Button type="submit" variant="accent" size="lg" disabled={submitting || photosBusy} className="mt-2 w-full sm:w-auto">
+            {submitting ? "Saving…" : photosBusy ? "Uploading banner…" : shop ? "Save changes" : "Create shop"}
           </Button>
         </form>
       </div>

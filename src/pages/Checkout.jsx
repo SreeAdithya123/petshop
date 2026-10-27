@@ -70,7 +70,9 @@ export function Checkout() {
   const [removedCount, setRemovedCount] = useState(0);
   const [placing, setPlacing] = useState(false);
   const [placeError, setPlaceError] = useState("");
-  const [placed, setPlaced] = useState(null); // { orderId, total, lines: [{ pet, shopName }] }
+  // { orderId, shopCount, total, lines: [{ pet, shopName }] }. A cart is split into one order per shop and
+  // the RPC returns only the first order's id, so that id is shown only when there is a single shop.
+  const [placed, setPlaced] = useState(null);
 
   // A cart can be days old: re-check availability against fresh listings before showing it, and
   // let sold, reserved or deleted pets drop out.
@@ -105,6 +107,7 @@ export function Checkout() {
     }
     setPlaced({
       orderId: String(orderId),
+      shopCount: new Set(items.map((pet) => pet.shopId)).size,
       total: items.reduce((sum, pet) => sum + pet.price, 0),
       lines: items.map((pet) => ({ pet, shopName: getShopById(pet.shopId)?.name })),
     });
@@ -120,14 +123,22 @@ export function Checkout() {
           <CheckCircle size={48} weight="fill" className="mx-auto text-trust" />
           <h1 className="mt-5 font-display text-3xl font-bold text-ink">Reservation confirmed</h1>
           <p className="mt-3 text-[15px] text-ink-soft">
-            Your pets are reserved. The shop will confirm pickup details with you; payment happens in person.
+            Your pets are reserved. Each shop will confirm pickup details with you; payment happens in person. You can
+            follow every order under My account → My orders.
           </p>
 
           <div className="mt-8 rounded-xl border border-border bg-surface p-6 text-left">
-            <div className="flex items-start justify-between gap-4 text-sm">
-              <span className="text-ink-soft">Order</span>
-              <span className="break-all text-right font-mono text-xs text-ink">{placed.orderId}</span>
-            </div>
+            {placed.shopCount === 1 ? (
+              <div className="flex items-start justify-between gap-4 text-sm">
+                <span className="text-ink-soft">Order</span>
+                <span className="break-all text-right font-mono text-xs text-ink">{placed.orderId}</span>
+              </div>
+            ) : (
+              <div className="flex items-start justify-between gap-4 text-sm">
+                <span className="text-ink-soft">Orders</span>
+                <span className="text-right text-ink">{placed.shopCount} orders, one per shop</span>
+              </div>
+            )}
             <ul className="mt-4 divide-y divide-border rounded-xl border border-border">
               {placed.lines.map(({ pet, shopName }) => (
                 <PetRow key={pet.id} pet={pet} shopName={shopName} />

@@ -1,58 +1,91 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { formatDate, formatPrice } from "../../lib/format";
-import { fieldClassName } from "../../lib/styles";
+import { jitsiRoomUrl } from "../../lib/videoRoom";
 import { Button } from "../ui/Button";
 import { StatusBadge } from "../ui/StatusBadge";
 import { ConfirmModal } from "./ConfirmModal";
 import { CustomerContact } from "./CustomerContact";
-import { categoryLabel, formatSlot, isHttpsUrl, modeLabel } from "./helpers";
+import { categoryLabel, formatSlot, modeLabel, resolveVideoLink } from "./helpers";
 import { Meta, MetaList } from "./Meta";
-import { updateRow } from "./mutations";
+import { NOTHING_CHANGED, updateRow } from "./mutations";
 import { Notice } from "./Notice";
+import { VideoLink } from "./VideoLink";
+import { VideoLinkField } from "./VideoLinkField";
 
-const LINK_ERROR = "Video links must start with https://";
-
+/**
+ * One customer booking of this shop's service, with Confirm / Mark completed /
+ * Cancel and the video-link field. A video booking gets a free PETSTA video room
+ * by default, so confirming never needs a pasted link.
+ */
 export function BookingCard({ booking, customer, readOnly, onChanged }) {
-  const [linkDraft, setLinkDraft] = useState(booking.video_room_url ?? "");
-  const [busy, setBusy] = useState(false);
+  const savedLink = (booking.video_room_url ?? "").trim();
+  const [linkDraft, setLinkDraft] = useState(savedLink || jitsiRoomUrl(booking.id));
+  const [busyAction, setBusyAction] = useState(null);
   const [error, setError] = useState("");
+  const [linkError, setLinkError] = useState("");
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const inFlight = useRef(false);
 
   const isVideo = booking.delivery_mode === "video";
   const isOpen = booking.status === "pending" || booking.status === "confirmed";
   const canAct = !readOnly && isOpen;
+  const editingLink = canAct && isVideo;
+  const busy = busyAction !== null;
 
-  async function apply(patch, fromStatus) {
-    setBusy(true);
+  /** Saves `patch` while the booking is still in `fromStatus`; resolves to true on success. */
+  async function apply(action, patch, fromStatus) {
+    if (inFlight.current) return false;
+    inFlight.current = true;
+    setBusyAction(action);
     setError("");
-    const message = await updateRow("service_bookings", booking.id, patch, fromStatus && { status: fromStatus });
-    setBusy(false);
+    setLinkError("");
+    const message = await updateRow("service_bookings", booking.id, patch, { status: fromStatus });
+    inFlight.current = false;
+    setBusyAction(null);
     if (message) setError(message);
-    else onChanged();
+    // After a stale-status refusal the list reloads too, so the card shows the real state.
+    if (!message || message === NOTHING_CHANGED) onChanged();
+    return !message;
   }
 
-  function confirmBooking() {
-    const link = linkDraft.trim();
-    // A video link is optional here, but if one is typed it has to be usable.
-    if (isVideo && link && !isHttpsUrl(link)) {
-      setError(LINK_ERROR);
-      return;
+  async function confirmBooking() {
+    const patch = { status: "confirmed" };
+    let resolvedLink = null;
+    if (isVideo) {
+      // An empty field means the free PETSTA room; a typed link must be https.
+      const resolved = resolveVideoLink(linkDraft, booking.id);
+      if (resolved.error) {
+        setLinkError(resolved.error);
+        return;
+      }
+      resolvedLink = resolved.link;
+      patch.video_room_url = resolvedLink;
     }
-    apply({ status: "confirmed", ...(isVideo && link ? { video_room_url: link } : {}) }, "pending");
+    const saved = await apply("confirm", patch, "pending");
+    if (saved && resolvedLink) setLinkDraft(resolvedLink);
   }
 
-  function saveLink() {
-    const link = linkDraft.trim();
-    if (!isHttpsUrl(link)) {
-      setError(LINK_ERROR);
+  async function saveLink() {
+    const resolved = resolveVideoLink(linkDraft, booking.id);
+    if (resolved.error) {
+      setLinkError(resolved.error);
       return;
     }
-    apply({ video_room_url: link });
+    const saved = await apply("link", { video_room_url: resolved.link }, booking.status);
+    if (saved) setLinkDraft(resolved.link);
   }
 
   async function cancelBooking() {
-    const message = await updateRow("service_bookings", booking.id, { status: "cancelled" });
-    if (message) return message;
+    if (inFlight.current) return "Another update is still being saved. Please wait a moment.";
+    inFlight.current = true;
+    setBusyAction("cancel");
+    const message = await updateRow("service_bookings", booking.id, { status: "cancelled" }, { status: booking.status });
+    inFlight.current = false;
+    setBusyAction(null);
+    if (message) {
+      if (message === NOTHING_CHANGED) onChanged();
+      return message;
+    }
     setConfirmingCancel(false);
     onChanged();
     return null;
@@ -79,16 +112,9 @@ export function BookingCard({ booking, customer, readOnly, onChanged }) {
         <Meta label="When">{formatSlot(booking.booking_date, booking.booking_time)}</Meta>
         <Meta label="How">{modeLabel(booking.delivery_mode)}</Meta>
         <Meta label="Price">{formatPrice(booking.price_at_booking)}</Meta>
-        {booking.video_room_url && !(canAct && isVideo) && (
+        {savedLink && !editingLink && (
           <Meta label="Video link">
-            <a
-              href={booking.video_room_url}
-              target="_blank"
-              rel="noreferrer"
-              className="break-all text-primary hover:underline"
-            >
-              {booking.video_room_url}
-            </a>
+            <VideoLink url={savedLink} />
           </Meta>
         )}
       </MetaList>
@@ -100,34 +126,34 @@ export function BookingCard({ booking, customer, readOnly, onChanged }) {
         </p>
       )}
 
-      {canAct && isVideo && (
+      {editingLink && (
         <div className="mt-4 rounded-lg bg-paper p-3">
-          <label htmlFor={`video-link-${booking.id}`} className="block text-sm font-medium text-ink">
-            Video link
-          </label>
-          <p className="mt-0.5 text-xs text-ink-soft">
-            Paste a Google Meet/Zoom link; the customer sees it on their Services &amp; Health pages.
-          </p>
-          <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-            <input
-              id={`video-link-${booking.id}`}
-              type="url"
-              inputMode="url"
-              placeholder="https://meet.google.com/..."
-              value={linkDraft}
-              onChange={(event) => setLinkDraft(event.target.value)}
-              className={`${fieldClassName(false)} mt-0! flex-1`}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={saveLink}
-              disabled={busy || !linkDraft.trim() || linkDraft.trim() === (booking.video_room_url ?? "")}
-            >
-              Save link
-            </Button>
-          </div>
+          <VideoLinkField
+            id={`video-link-${booking.id}`}
+            roomId={booking.id}
+            value={linkDraft}
+            onChange={(next) => {
+              setLinkDraft(next);
+              setLinkError("");
+            }}
+            error={linkError}
+            disabled={busy}
+          />
+          {booking.status === "confirmed" ? (
+            <div className="mt-3 flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={saveLink}
+                disabled={busy || linkDraft.trim() === savedLink}
+              >
+                {busyAction === "link" ? "Saving…" : "Save link"}
+              </Button>
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-ink-soft">The link is saved when you confirm the booking.</p>
+          )}
         </div>
       )}
 
@@ -141,7 +167,7 @@ export function BookingCard({ booking, customer, readOnly, onChanged }) {
         <div className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4">
           {booking.status === "pending" && (
             <Button type="button" variant="accent" size="sm" onClick={confirmBooking} disabled={busy}>
-              Confirm
+              {busyAction === "confirm" ? "Confirming…" : "Confirm"}
             </Button>
           )}
           {booking.status === "confirmed" && (
@@ -149,10 +175,10 @@ export function BookingCard({ booking, customer, readOnly, onChanged }) {
               type="button"
               variant="primary"
               size="sm"
-              onClick={() => apply({ status: "completed" }, "confirmed")}
+              onClick={() => apply("complete", { status: "completed" }, "confirmed")}
               disabled={busy}
             >
-              Mark completed
+              {busyAction === "complete" ? "Saving…" : "Mark completed"}
             </Button>
           )}
           <Button type="button" variant="outline" size="sm" onClick={() => setConfirmingCancel(true)} disabled={busy}>

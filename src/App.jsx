@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ScrollToTop } from "./components/ScrollToTop";
 import { ProtectedRoute } from "./components/auth/ProtectedRoute";
 import { AccountLayout } from "./components/layout/AccountLayout";
@@ -37,6 +37,10 @@ import { AdminServices } from "./pages/admin/Services";
 import { AdminShops } from "./pages/admin/Shops";
 import { AdminSupport } from "./pages/admin/Support";
 import { AdminVideos } from "./pages/admin/Videos";
+import { ForgotPassword } from "./pages/auth/ForgotPassword";
+import { ResetPassword } from "./pages/auth/ResetPassword";
+import { Privacy } from "./pages/legal/Privacy";
+import { Terms } from "./pages/legal/Terms";
 import { SellerAnalytics } from "./pages/seller/Analytics";
 import { SellerContract } from "./pages/seller/Contract";
 import { SellerDashboard } from "./pages/seller/Dashboard";
@@ -55,12 +59,24 @@ function admin(element) {
 }
 
 export default function App() {
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
   const initialize = useAuthStore((state) => state.initialize);
+  const passwordRecovery = useAuthStore((state) => state.passwordRecovery);
 
   useEffect(() => {
     initialize();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Opening a password-reset email creates a temporary session; until the new
+  // password is chosen (or the recovery is cancelled) the visitor stays on the
+  // reset page.
+  useEffect(() => {
+    if (passwordRecovery && pathname !== "/reset-password") {
+      navigate("/reset-password", { replace: true });
+    }
+  }, [passwordRecovery, pathname, navigate]);
 
   return (
     <>
@@ -84,6 +100,12 @@ export default function App() {
           <Route path="/support" element={<Support />} />
           <Route path="/signup" element={<SignUp />} />
           <Route path="/login" element={<Login />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
+
+          {/* Legal */}
+          <Route path="/legal/privacy" element={<Privacy />} />
+          <Route path="/legal/terms" element={<Terms />} />
 
           {/* Learn and "Sell on PETSTA" now live inside My account */}
           <Route path="/learn" element={<Navigate to="/account/learn" replace />} />

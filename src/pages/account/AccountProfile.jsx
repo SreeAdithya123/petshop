@@ -13,7 +13,9 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { AboutLegalCard } from "../../components/account/AboutLegalCard";
 import { AccountPageHeader } from "../../components/account/AccountPage";
+import { DangerZone } from "../../components/account/DangerZone";
 import { Button } from "../../components/ui/Button";
 import { Field } from "../../components/ui/FormField";
 import { formatDate } from "../../lib/format";
@@ -262,6 +264,15 @@ export function AccountProfile() {
           ))}
         </ul>
       </section>
+
+      <section className="mt-10">
+        <h2 className="font-display text-xl font-semibold text-ink">About &amp; legal</h2>
+        <AboutLegalCard />
+      </section>
+
+      <div className="mt-10">
+        <DangerZone role={profile.role} />
+      </div>
     </div>
   );
 }

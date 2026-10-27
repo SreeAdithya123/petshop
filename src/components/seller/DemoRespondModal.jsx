@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { fieldClassName } from "../../lib/styles";
 import { toDateInputValue } from "../../lib/format";
+import { jitsiRoomUrl } from "../../lib/videoRoom";
 import { Button } from "../ui/Button";
 import { Field } from "../ui/FormField";
 import { Modal } from "../ui/Modal";
 import { CustomerContact } from "./CustomerContact";
-import { formatSlot, isHttpsUrl, modeLabel, toTimeInputValue } from "./helpers";
+import { formatSlot, isUsableVideoLink, modeLabel, toTimeInputValue } from "./helpers";
 import { updateRow } from "./mutations";
 import { Notice } from "./Notice";
+import { VideoLinkField } from "./VideoLinkField";
 
 const DECISIONS_PENDING = [
   { value: "approve", label: "Approve", hint: "Confirm a date and time" },
@@ -20,7 +22,7 @@ const DECISIONS_APPROVED = [
   { value: "reject", label: "Reject", hint: "Call it off with a reason" },
 ];
 
-function validate(decision, form, demo) {
+function validate(decision, form) {
   const errors = {};
   const needsSlot = decision === "approve" || decision === "update";
 
@@ -31,9 +33,9 @@ function validate(decision, form, demo) {
     }
     if (!form.confirmed_time) errors.confirmed_time = "Pick the time.";
 
+    // Empty is fine: a video demo then uses the free PETSTA room. A typed link has to be usable.
     const link = form.meet_link.trim();
-    if (demo.mode === "video" && !link) errors.meet_link = "Add the video link for this demo.";
-    else if (link && !isHttpsUrl(link)) errors.meet_link = "The link must start with https://";
+    if (link && !isUsableVideoLink(link)) errors.meet_link = "The link must start with https://";
   }
 
   if (decision === "reject" && !form.seller_note.trim()) {
@@ -45,11 +47,13 @@ function validate(decision, form, demo) {
 /** Approve / reject a pending demo request, or complete / update / reject an approved one. */
 export function DemoRespondModal({ demo, customer, onClose, onDone }) {
   const decisions = demo.status === "pending" ? DECISIONS_PENDING : DECISIONS_APPROVED;
+  const isVideo = demo.mode === "video";
   const [decision, setDecision] = useState(decisions[0].value);
   const [form, setForm] = useState(() => ({
     confirmed_date: demo.confirmed_date ?? demo.preferred_date ?? "",
     confirmed_time: toTimeInputValue(demo.confirmed_time ?? demo.preferred_time),
-    meet_link: demo.meet_link ?? "",
+    // A video demo starts with its free PETSTA room; the shop may replace it.
+    meet_link: (demo.meet_link ?? "").trim() || (isVideo ? jitsiRoomUrl(demo.id) : ""),
     seller_note: demo.seller_note ?? "",
   }));
   const [errors, setErrors] = useState({});
@@ -57,24 +61,27 @@ export function DemoRespondModal({ demo, customer, onClose, onDone }) {
   const [submitting, setSubmitting] = useState(false);
 
   const showSlot = decision === "approve" || decision === "update";
-  const isVideo = demo.mode === "video";
 
   function updateField(field, value) {
     setForm((previous) => ({ ...previous, [field]: value }));
+    setErrors((previous) => (previous[field] ? { ...previous, [field]: undefined } : previous));
   }
 
   async function handleSubmit(event) {
     event.preventDefault();
+    if (submitting) return;
     setFormError("");
-    const nextErrors = validate(decision, form, demo);
+    const nextErrors = validate(decision, form);
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) return;
 
     const note = form.seller_note.trim() || null;
+    const typedLink = form.meet_link.trim();
     const slot = {
       confirmed_date: form.confirmed_date,
       confirmed_time: form.confirmed_time,
-      meet_link: form.meet_link.trim() || null,
+      // Video demos always carry a link: the typed one, else the PETSTA room.
+      meet_link: typedLink || (isVideo ? jitsiRoomUrl(demo.id) : null),
       seller_note: note,
     };
     const patches = {
@@ -109,7 +116,7 @@ export function DemoRespondModal({ demo, customer, onClose, onDone }) {
       </div>
 
       <form onSubmit={handleSubmit} noValidate className="mt-5 flex flex-col gap-5">
-        <fieldset>
+        <fieldset disabled={submitting}>
           <legend className="text-sm text-ink">Your decision</legend>
           <div className="mt-1.5 grid gap-2 sm:grid-cols-[repeat(auto-fit,minmax(9rem,1fr))]">
             {decisions.map((option) => (
@@ -146,6 +153,7 @@ export function DemoRespondModal({ demo, customer, onClose, onDone }) {
                   type="date"
                   min={decision === "approve" ? toDateInputValue() : undefined}
                   value={form.confirmed_date}
+                  disabled={submitting}
                   onChange={(event) => updateField("confirmed_date", event.target.value)}
                   aria-invalid={Boolean(errors.confirmed_date)}
                   className={fieldClassName(Boolean(errors.confirmed_date))}
@@ -156,6 +164,7 @@ export function DemoRespondModal({ demo, customer, onClose, onDone }) {
                   id="demo-time"
                   type="time"
                   value={form.confirmed_time}
+                  disabled={submitting}
                   onChange={(event) => updateField("confirmed_time", event.target.value)}
                   aria-invalid={Boolean(errors.confirmed_time)}
                   className={fieldClassName(Boolean(errors.confirmed_time))}
@@ -163,28 +172,36 @@ export function DemoRespondModal({ demo, customer, onClose, onDone }) {
               </Field>
             </div>
 
-            <Field
-              label={isVideo ? "Video link" : "Meeting link"}
-              htmlFor="demo-link"
-              error={errors.meet_link}
-              hint={
-                isVideo
-                  ? "Paste a Google Meet/Zoom link; the customer sees it on their Services & Health pages."
-                  : "Only needed if you want to share an online link as well."
-              }
-              optional={!isVideo}
-            >
-              <input
+            {isVideo ? (
+              <VideoLinkField
                 id="demo-link"
-                type="url"
-                inputMode="url"
-                placeholder="https://meet.google.com/..."
+                roomId={demo.id}
                 value={form.meet_link}
-                onChange={(event) => updateField("meet_link", event.target.value)}
-                aria-invalid={Boolean(errors.meet_link)}
-                className={fieldClassName(Boolean(errors.meet_link))}
+                onChange={(next) => updateField("meet_link", next)}
+                error={errors.meet_link}
+                disabled={submitting}
               />
-            </Field>
+            ) : (
+              <Field
+                label="Meeting link"
+                htmlFor="demo-link"
+                error={errors.meet_link}
+                hint="Only needed if you want to share an online link as well."
+                optional
+              >
+                <input
+                  id="demo-link"
+                  type="url"
+                  inputMode="url"
+                  placeholder="https://meet.google.com/..."
+                  value={form.meet_link}
+                  disabled={submitting}
+                  onChange={(event) => updateField("meet_link", event.target.value)}
+                  aria-invalid={Boolean(errors.meet_link)}
+                  className={fieldClassName(Boolean(errors.meet_link))}
+                />
+              </Field>
+            )}
           </>
         )}
 
@@ -199,6 +216,7 @@ export function DemoRespondModal({ demo, customer, onClose, onDone }) {
             id="demo-note"
             rows={3}
             value={form.seller_note}
+            disabled={submitting}
             onChange={(event) => updateField("seller_note", event.target.value)}
             aria-invalid={Boolean(errors.seller_note)}
             className={fieldClassName(Boolean(errors.seller_note))}

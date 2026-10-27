@@ -1,12 +1,16 @@
 import { useState } from "react";
+import { deleteListingPhotosByUrls, removedPhotoUrls, unsavedPhotoUrls } from "../../lib/listingPhotos";
 import { fieldClassName } from "../../lib/styles";
 import { supabase } from "../../lib/supabaseClient";
 import { Button } from "../ui/Button";
 import { Field } from "../ui/FormField";
 import { Modal } from "../ui/Modal";
+import { PhotoUploader } from "../ui/PhotoUploader";
 import { SERVICE_CATEGORIES } from "./helpers";
 import { updateRow } from "./mutations";
 import { Notice } from "./Notice";
+
+const NO_PHOTOS = [];
 
 function toForm(service) {
   return {
@@ -15,6 +19,7 @@ function toForm(service) {
     description: service?.description ?? "",
     price: service?.price != null ? String(service.price) : "",
     duration: service?.duration_minutes != null ? String(service.duration_minutes) : "",
+    photo_urls: [...new Set(service?.photo_urls ?? [])],
   };
 }
 
@@ -41,14 +46,28 @@ export function ServiceFormModal({ shopId, service = null, onClose, onSaved }) {
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [photosBusy, setPhotosBusy] = useState(false);
+
+  // What the database already holds for this service (nothing when adding).
+  const savedPhotoUrls = service?.photo_urls ?? NO_PHOTOS;
 
   function updateField(field, value) {
     setForm((previous) => ({ ...previous, [field]: value }));
   }
 
+  // Closing without saving: photos uploaded in this session are no longer wanted.
+  function handleClose() {
+    deleteListingPhotosByUrls(unsavedPhotoUrls(savedPhotoUrls, form.photo_urls));
+    onClose();
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
     setFormError("");
+    if (photosBusy) {
+      setFormError("Your photos are still uploading. Save again in a moment.");
+      return;
+    }
     const nextErrors = validate(form);
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) return;
@@ -62,6 +81,7 @@ export function ServiceFormModal({ shopId, service = null, onClose, onSaved }) {
       description: form.description.trim(),
       price: Number(form.price),
       duration_minutes: form.duration.trim() ? Number(form.duration) : null,
+      photo_urls: form.photo_urls,
     };
 
     let message = null;
@@ -77,12 +97,14 @@ export function ServiceFormModal({ shopId, service = null, onClose, onSaved }) {
       setFormError(message);
       return;
     }
+    // Photos taken off this service are no longer referenced anywhere.
+    deleteListingPhotosByUrls(removedPhotoUrls(savedPhotoUrls, form.photo_urls));
     onSaved(editing ? "Service updated." : "Service submitted. New services go live after admin approval.");
   }
 
   return (
     <Modal
-      onClose={submitting ? undefined : onClose}
+      onClose={submitting ? undefined : handleClose}
       title={editing ? "Edit service" : "Add a service"}
       description={editing ? undefined : "New services go live after admin approval."}
     >
@@ -159,14 +181,25 @@ export function ServiceFormModal({ shopId, service = null, onClose, onSaved }) {
           />
         </Field>
 
+        <PhotoUploader
+          shopId={shopId}
+          kind="services"
+          label="Photos"
+          urls={form.photo_urls}
+          savedUrls={savedPhotoUrls}
+          onChange={(next) => updateField("photo_urls", next)}
+          onBusyChange={setPhotosBusy}
+          disabled={submitting}
+        />
+
         {formError && <Notice tone="error">{formError}</Notice>}
 
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <Button type="button" variant="outline" size="sm" onClick={onClose} disabled={submitting}>
+          <Button type="button" variant="outline" size="sm" onClick={handleClose} disabled={submitting}>
             Cancel
           </Button>
-          <Button type="submit" variant="accent" size="sm" disabled={submitting}>
-            {submitting ? "Saving…" : editing ? "Save changes" : "Add service"}
+          <Button type="submit" variant="accent" size="sm" disabled={submitting || photosBusy}>
+            {submitting ? "Saving…" : photosBusy ? "Uploading photos…" : editing ? "Save changes" : "Add service"}
           </Button>
         </div>
       </form>

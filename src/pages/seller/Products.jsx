@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import { Container } from "../../components/layout/Container";
 import { Button } from "../../components/ui/Button";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { PhotoUploader } from "../../components/ui/PhotoUploader";
 import { supabase } from "../../lib/supabaseClient";
 import { useMyShop } from "../../hooks/useMyShop";
 import { formatPrice } from "../../lib/format";
+import { deleteListingPhotosByUrls } from "../../lib/listingPhotos";
 
 function fieldClassName(hasError) {
   return `mt-1.5 w-full rounded-lg border bg-surface px-4 py-2.5 text-[15px] text-ink focus:outline-none ${
@@ -23,7 +25,7 @@ const emptyForm = {
   description: "",
   price: "",
   stock_quantity: "",
-  photo_urls: "",
+  photo_urls: [],
 };
 
 function validate(form) {
@@ -49,6 +51,7 @@ export function SellerProducts() {
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [photosBusy, setPhotosBusy] = useState(false);
 
   async function loadProducts(shopId) {
     setLoading(true);
@@ -74,20 +77,32 @@ export function SellerProducts() {
     setForm((prev) => ({ ...prev, [field]: value }));
   }
 
+  // Cancelling drops the draft, including any photos already uploaded for it.
+  function toggleForm() {
+    if (submitting) return; // a save in flight may be about to reference those photos
+    if (formOpen) {
+      deleteListingPhotosByUrls(form.photo_urls); // nothing is saved yet, so all of them are unwanted
+      setForm(emptyForm);
+      setErrors({});
+      setFormError("");
+      setPhotosBusy(false);
+    }
+    setFormOpen((open) => !open);
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
     setFormError("");
+    if (photosBusy) {
+      setFormError("Your photos are still uploading. Add the product again in a moment.");
+      return;
+    }
     const validationErrors = validate(form);
     setErrors(validationErrors);
     if (Object.keys(validationErrors).length > 0) return;
 
     setSubmitting(true);
     try {
-      const photoUrls = form.photo_urls
-        .split(",")
-        .map((url) => url.trim())
-        .filter(Boolean);
-
       const { error: insertError } = await supabase.from("products").insert({
         shop_id: shop.id,
         category: form.category,
@@ -95,7 +110,7 @@ export function SellerProducts() {
         description: form.description.trim() || null,
         price: Number(form.price),
         stock_quantity: Number(form.stock_quantity),
-        photo_urls: photoUrls,
+        photo_urls: form.photo_urls,
       });
       if (insertError) throw insertError;
 
@@ -145,7 +160,7 @@ export function SellerProducts() {
     <Container className="py-12">
       <div className="flex items-center justify-between gap-4">
         <h1 className="font-display text-3xl font-bold text-ink">Products</h1>
-        <Button type="button" variant="accent" size="sm" onClick={() => setFormOpen((open) => !open)}>
+        <Button type="button" variant="accent" size="sm" onClick={toggleForm}>
           {formOpen ? "Cancel" : "Add a product"}
         </Button>
       </div>
@@ -234,25 +249,20 @@ export function SellerProducts() {
             />
           </div>
 
-          <div>
-            <label htmlFor="photo_urls" className="block text-sm text-ink">
-              Photo URLs
-            </label>
-            <input
-              id="photo_urls"
-              type="text"
-              placeholder="https://example.com/photo1.jpg, https://example.com/photo2.jpg"
-              value={form.photo_urls}
-              onChange={(event) => updateField("photo_urls", event.target.value)}
-              className={fieldClassName(false)}
-            />
-            <p className="mt-1.5 text-xs text-ink-soft">Separate multiple URLs with commas.</p>
-          </div>
+          <PhotoUploader
+            shopId={shop?.id}
+            kind="products"
+            label="Photos"
+            urls={form.photo_urls}
+            onChange={(next) => updateField("photo_urls", next)}
+            onBusyChange={setPhotosBusy}
+            disabled={submitting}
+          />
 
           {formError && <p className="text-sm text-error">{formError}</p>}
 
-          <Button type="submit" variant="accent" size="md" disabled={submitting} className="sm:w-auto">
-            {submitting ? "Adding…" : "Add product"}
+          <Button type="submit" variant="accent" size="md" disabled={submitting || photosBusy} className="sm:w-auto">
+            {submitting ? "Adding…" : photosBusy ? "Uploading photos…" : "Add product"}
           </Button>
         </form>
       )}

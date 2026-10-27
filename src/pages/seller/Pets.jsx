@@ -3,11 +3,13 @@ import { Container } from "../../components/layout/Container";
 import { Button } from "../../components/ui/Button";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { Field } from "../../components/ui/FormField";
+import { PhotoUploader } from "../../components/ui/PhotoUploader";
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { supabase } from "../../lib/supabaseClient";
 import { fieldClassName } from "../../lib/styles";
 import { useMyShop } from "../../hooks/useMyShop";
 import { formatPrice } from "../../lib/format";
+import { deleteListingPhotosByUrls, removedPhotoUrls, unsavedPhotoUrls } from "../../lib/listingPhotos";
 
 const GENDER_OPTIONS = [
   { value: "", label: "Unknown" },
@@ -19,6 +21,8 @@ const GENDER_OPTIONS = [
 const BADGE_STATUS = { reserved: "pending" };
 const STATUS_LABELS = { available: "Available", reserved: "Reserved", sold: "Sold" };
 
+const NO_PHOTOS = [];
+
 const emptyForm = {
   name: "",
   gender: "",
@@ -27,7 +31,7 @@ const emptyForm = {
   age_months: "",
   price: "",
   description: "",
-  photo_urls: "",
+  photo_urls: [],
 };
 
 function petToForm(pet) {
@@ -39,7 +43,7 @@ function petToForm(pet) {
     age_months: String(pet.age_months ?? ""),
     price: String(pet.price ?? ""),
     description: pet.description ?? "",
-    photo_urls: (pet.photo_urls ?? []).join(", "),
+    photo_urls: [...new Set(pet.photo_urls ?? [])],
   };
 }
 
@@ -52,10 +56,7 @@ function formToPayload(form) {
     age_months: Number(form.age_months),
     price: Number(form.price),
     description: form.description.trim() || null,
-    photo_urls: form.photo_urls
-      .split(",")
-      .map((url) => url.trim())
-      .filter(Boolean),
+    photo_urls: form.photo_urls,
   };
 }
 
@@ -86,6 +87,7 @@ export function SellerPets() {
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [photosBusy, setPhotosBusy] = useState(false);
 
   const [busyId, setBusyId] = useState(null);
   const [actionError, setActionError] = useState("");
@@ -127,6 +129,9 @@ export function SellerPets() {
     if (formOpen) formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [formOpen, editingId]);
 
+  // What the database already holds for the pet being edited (nothing when adding).
+  const savedPhotoUrls = (editingId && pets.find((pet) => pet.id === editingId)?.photo_urls) || NO_PHOTOS;
+
   function updateField(field, value) {
     setForm((prev) => ({ ...prev, [field]: value }));
   }
@@ -136,14 +141,26 @@ export function SellerPets() {
     setForm(emptyForm);
     setErrors({});
     setFormError("");
+    setPhotosBusy(false);
   }
 
+  // Photos uploaded into a form that is abandoned are no longer wanted.
+  function discardUnsavedPhotos() {
+    deleteListingPhotosByUrls(unsavedPhotoUrls(savedPhotoUrls, form.photo_urls));
+  }
+
+  // While a save is in flight it may be about to reference the uploaded photos,
+  // so the form can't be abandoned or swapped out until it settles.
   function openAddForm() {
+    if (submitting) return;
+    discardUnsavedPhotos();
     resetForm();
     setFormOpen(true);
   }
 
   function openEditForm(pet) {
+    if (submitting) return;
+    discardUnsavedPhotos();
     resetForm();
     setEditingId(pet.id);
     setForm(petToForm(pet));
@@ -155,9 +172,19 @@ export function SellerPets() {
     setFormOpen(false);
   }
 
+  function cancelForm() {
+    if (submitting) return;
+    discardUnsavedPhotos();
+    closeForm();
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
     setFormError("");
+    if (photosBusy) {
+      setFormError("Your photos are still uploading. Save again in a moment.");
+      return;
+    }
     const validationErrors = validate(form);
     setErrors(validationErrors);
     if (Object.keys(validationErrors).length > 0) return;
@@ -170,6 +197,8 @@ export function SellerPets() {
         : await supabase.from("pets").insert({ shop_id: shop.id, ...payload });
       if (saveError) throw saveError;
 
+      // Photos taken off this pet are no longer referenced anywhere.
+      deleteListingPhotosByUrls(removedPhotoUrls(savedPhotoUrls, form.photo_urls));
       closeForm();
       reload();
     } catch (submitError) {
@@ -222,7 +251,7 @@ export function SellerPets() {
     <Container className="py-12">
       <div className="flex items-center justify-between gap-4">
         <h1 className="font-display text-3xl font-bold text-ink">Pets</h1>
-        <Button type="button" variant="accent" size="sm" disabled={!shop} onClick={formOpen ? closeForm : openAddForm}>
+        <Button type="button" variant="accent" size="sm" disabled={!shop} onClick={formOpen ? cancelForm : openAddForm}>
           {formOpen ? "Cancel" : "Add a pet"}
         </Button>
       </div>
@@ -321,16 +350,17 @@ export function SellerPets() {
             />
           </Field>
 
-          <Field label="Photo URLs" htmlFor="photo_urls" hint="Separate multiple URLs with commas.">
-            <input
-              id="photo_urls"
-              type="text"
-              placeholder="https://example.com/photo1.jpg, https://example.com/photo2.jpg"
-              value={form.photo_urls}
-              onChange={(event) => updateField("photo_urls", event.target.value)}
-              className={fieldClassName(false)}
-            />
-          </Field>
+          <PhotoUploader
+            key={editingId ?? "new"}
+            shopId={shop?.id}
+            kind="pets"
+            label="Photos"
+            urls={form.photo_urls}
+            savedUrls={savedPhotoUrls}
+            onChange={(next) => updateField("photo_urls", next)}
+            onBusyChange={setPhotosBusy}
+            disabled={submitting}
+          />
 
           {formError && (
             <p role="alert" className="text-sm text-error">
@@ -338,8 +368,8 @@ export function SellerPets() {
             </p>
           )}
 
-          <Button type="submit" variant="accent" size="md" disabled={submitting} className="sm:w-auto">
-            {submitting ? "Saving…" : editingId ? "Save changes" : "Add pet"}
+          <Button type="submit" variant="accent" size="md" disabled={submitting || photosBusy} className="sm:w-auto">
+            {submitting ? "Saving…" : photosBusy ? "Uploading photos…" : editingId ? "Save changes" : "Add pet"}
           </Button>
         </form>
       )}

@@ -1,4 +1,5 @@
 import { formatDate } from "../../lib/format";
+import { isSafeWebLink, jitsiRoomUrl } from "../../lib/videoRoom";
 
 export const SERVICE_CATEGORIES = [
   { value: "vet", label: "Vet" },
@@ -64,6 +65,25 @@ export function isHttpsUrl(value) {
   } catch {
     return false;
   }
+}
+
+export const VIDEO_LINK_ERROR = "Video links must start with https://";
+
+/** A link a shop typed for a video call: a web link with a host, over https (the only kind the app stores). */
+export function isUsableVideoLink(value) {
+  return isSafeWebLink(value) && isHttpsUrl(value);
+}
+
+/**
+ * Turns what the shop typed into the link to store: an empty field means "use
+ * PETSTA's free video room" for `roomId` (the booking or demo id); anything
+ * else has to be an https link. Resolves to { link, error }.
+ */
+export function resolveVideoLink(raw, roomId) {
+  const text = String(raw ?? "").trim();
+  if (!text) return { link: jitsiRoomUrl(roomId), error: null };
+  if (!isUsableVideoLink(text)) return { link: null, error: VIDEO_LINK_ERROR };
+  return { link: text, error: null };
 }
 
 /** "#1a2b3c4d": the first 8 characters of an order uuid. */

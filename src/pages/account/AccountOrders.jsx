@@ -1,15 +1,19 @@
-import { ArrowCounterClockwise, Gift } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ChatCircle, Gift, Headset, XCircle } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { AccountPageHeader, ErrorNote, LoadingNote } from "../../components/account/AccountPage";
 import {
+  groupItemsByShop,
   isRefundable,
   orderTypeLabel,
+  rpcErrorMessage,
   shortOrderId,
   useOrderItems,
 } from "../../components/account/accountHelpers";
+import { OrderTimeline, orderTimelineText } from "../../components/account/OrderTimeline";
 import { Button } from "../../components/ui/Button";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { Modal } from "../../components/ui/Modal";
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { formatDate, formatOrderDate, formatPrice } from "../../lib/format";
 import { supabase } from "../../lib/supabaseClient";
@@ -17,6 +21,16 @@ import { useAuthStore } from "../../store/authStore";
 import { useCatalog } from "../../store/catalogStore";
 
 const PAGE_SIZE = 10;
+
+const DANGER_OUTLINE =
+  "inline-flex items-center justify-center gap-2 rounded-lg border border-error/40 px-4 py-2 text-sm font-medium text-error transition-colors duration-150 hover:bg-error/5 disabled:pointer-events-none disabled:opacity-50 whitespace-nowrap";
+const DANGER_SOLID =
+  "inline-flex items-center justify-center gap-2 rounded-lg bg-error px-5 py-2.5 text-[15px] font-medium text-white transition-colors duration-150 hover:opacity-90 disabled:pointer-events-none disabled:opacity-50 whitespace-nowrap";
+
+/** Deep link to the support page with the shop and order pre-selected. */
+function supportLink(shopId, orderId) {
+  return `/support?shop=${encodeURIComponent(shopId)}&order=${encodeURIComponent(orderId)}`;
+}
 
 function OrderItems({ state }) {
   if (state.status === "idle" || state.status === "loading") {
@@ -76,12 +90,34 @@ function GiftNote({ gift }) {
   );
 }
 
-function OrderCard({ order, gift }) {
+function OrderCard({ order, gift, onChanged }) {
   const items = useOrderItems(order.id);
+  const [confirming, setConfirming] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [actionError, setActionError] = useState("");
+
+  const itemsBusy = items.status === "idle" || items.status === "loading";
+  // Shop contact details are private, so every conversation with a shop goes through a support ticket.
+  const shopGroups = items.status === "ready" ? groupItemsByShop(items.items) : [];
   // Nothing to refund when none of the items belongs to a shop.
-  const canRefund =
-    isRefundable(order) && (items.status !== "ready" || items.items.some((item) => item.shopId));
+  const canRefund = isRefundable(order) && (items.status !== "ready" || shopGroups.length > 0);
   const discount = Number(order.discount_amount) || 0;
+
+  async function cancelOrder() {
+    if (cancelling) return;
+    setCancelling(true);
+    setActionError("");
+    try {
+      const { error } = await supabase.rpc("cancel_my_order", { p_order_id: order.id });
+      if (error) setActionError(rpcErrorMessage(error));
+    } catch (error) {
+      setActionError(rpcErrorMessage(error));
+    }
+    setCancelling(false);
+    setConfirming(false);
+    // Reload either way: when the cancel was refused, the order has usually moved on.
+    onChanged();
+  }
 
   return (
     <article className="rounded-xl border border-border bg-surface p-4 sm:p-5">
@@ -98,6 +134,11 @@ function OrderCard({ order, gift }) {
         </div>
       </div>
 
+      <div className="mt-5">
+        <OrderTimeline status={order.status} orderType={order.order_type} />
+        <p className="mt-3 text-sm text-ink-soft">{orderTimelineText(order.status, order.order_type)}</p>
+      </div>
+
       {gift && <GiftNote gift={gift} />}
 
       <OrderItems state={items} />
@@ -110,13 +151,61 @@ function OrderCard({ order, gift }) {
         </div>
       )}
 
-      {canRefund && (
-        <div className="mt-4 flex justify-end">
+      {actionError && (
+        <p role="alert" className="mt-4 text-sm text-error">
+          {actionError}
+        </p>
+      )}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        {shopGroups.map((group) => (
+          <Button key={group.shopId} to={supportLink(group.shopId, order.id)} variant="outline" size="sm">
+            <ChatCircle size={16} />
+            {shopGroups.length === 1 || !group.shopName ? "Message the shop" : `Message ${group.shopName}`}
+          </Button>
+        ))}
+        {/* No shop to address (once the items have loaded): ask PETSTA instead. */}
+        {shopGroups.length === 0 && !itemsBusy && (
+          <Button to={`/support?order=${encodeURIComponent(order.id)}`} variant="outline" size="sm">
+            <Headset size={16} />
+            Ask about this order
+          </Button>
+        )}
+        {canRefund && (
           <Button to={`/account/refunds?order=${order.id}`} variant="outline" size="sm">
             <ArrowCounterClockwise size={16} />
             Request refund
           </Button>
-        </div>
+        )}
+        {order.status === "pending" && (
+          <button type="button" onClick={() => setConfirming(true)} disabled={cancelling} className={DANGER_OUTLINE}>
+            <XCircle size={16} />
+            {cancelling ? "Cancelling…" : "Cancel order"}
+          </button>
+        )}
+      </div>
+
+      {confirming && (
+        <Modal
+          onClose={() => {
+            if (!cancelling) setConfirming(false);
+          }}
+          title="Cancel this order?"
+          maxWidth="max-w-md"
+        >
+          <p className="text-[15px] text-ink-soft">
+            Order #{shortOrderId(order.id)} will be cancelled and its items released back to the shop. This can't be
+            undone.
+          </p>
+          <div className="mt-6 flex flex-wrap justify-end gap-3">
+            <Button variant="outline" onClick={() => setConfirming(false)} disabled={cancelling}>
+              Keep order
+            </Button>
+            <button type="button" onClick={cancelOrder} disabled={cancelling} className={DANGER_SOLID}>
+              {cancelling ? "Cancelling…" : "Cancel order"}
+            </button>
+          </div>
+        </Modal>
       )}
     </article>
   );
@@ -165,7 +254,7 @@ function ReservationCard({ reservation, pet, catalogLoading }) {
 
 export function AccountOrders() {
   const userId = useAuthStore((state) => state.session?.user?.id);
-  const { getPetById, loading: catalogLoading } = useCatalog();
+  const { getPetById, loading: catalogLoading, reload: reloadCatalog } = useCatalog();
 
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
@@ -219,10 +308,18 @@ export function AccountOrders() {
     setReloadKey((key) => key + 1);
   }
 
+  // An order was cancelled (or the cancel was refused because it had moved
+  // on): refetch without blanking the page, and refresh the catalog because
+  // a cancelled order's pets are available to everyone again.
+  function handleOrderChanged() {
+    setReloadKey((key) => key + 1);
+    reloadCatalog();
+  }
+
   const header = (
     <AccountPageHeader
       title="My orders"
-      description="Your purchases, gifts and pet reservations. The shop confirms pickup details with you after you order."
+      description="Your purchases, gifts and pet reservations. You pick up and pay in person: message the shop from an order to arrange it."
     />
   );
 
@@ -272,7 +369,12 @@ export function AccountOrders() {
         {orders.length > 0 ? (
           <div className="mt-4 flex flex-col gap-3">
             {orders.slice(0, visibleCount).map((order) => (
-              <OrderCard key={order.id} order={order} gift={giftsByOrder.get(order.id)} />
+              <OrderCard
+                key={order.id}
+                order={order}
+                gift={giftsByOrder.get(order.id)}
+                onChanged={handleOrderChanged}
+              />
             ))}
             {orders.length > visibleCount && (
               <Button

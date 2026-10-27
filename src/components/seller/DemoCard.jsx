@@ -4,6 +4,7 @@ import { StatusBadge } from "../ui/StatusBadge";
 import { CustomerContact } from "./CustomerContact";
 import { formatSlot, modeLabel } from "./helpers";
 import { Meta, MetaList } from "./Meta";
+import { VideoLink } from "./VideoLink";
 
 const STATUS_LABELS = { pending: "Awaiting your response" };
 
@@ -32,10 +33,8 @@ export function DemoCard({ demo, customer, readOnly, onRespond }) {
         <Meta label="How">{modeLabel(demo.mode)}</Meta>
         {confirmed && <Meta label="Confirmed for">{formatSlot(demo.confirmed_date, demo.confirmed_time)}</Meta>}
         {demo.meet_link && (
-          <Meta label="Video link">
-            <a href={demo.meet_link} target="_blank" rel="noreferrer" className="break-all text-primary hover:underline">
-              {demo.meet_link}
-            </a>
+          <Meta label={demo.mode === "video" ? "Video link" : "Meeting link"}>
+            <VideoLink url={demo.meet_link} />
           </Meta>
         )}
       </MetaList>

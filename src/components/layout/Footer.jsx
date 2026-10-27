@@ -8,11 +8,17 @@ const footerLinks = [
   { to: "/health", label: "Health" },
 ];
 
+const legalLinks = [
+  { to: "/support", label: "Support" },
+  { to: "/legal/privacy", label: "Privacy Policy" },
+  { to: "/legal/terms", label: "Terms of Use" },
+];
+
 export function Footer() {
   return (
     <footer className="mt-20 border-t border-border bg-surface">
       <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-        <div className="grid gap-10 sm:grid-cols-[1.4fr_1fr]">
+        <div className="grid gap-10 sm:grid-cols-[1.4fr_1fr_1fr]">
           <div>
             <Link to="/" className="flex items-center gap-2.5">
               <PawMark />
@@ -28,6 +34,17 @@ export function Footer() {
           <nav aria-label="Footer">
             <ul className="grid gap-2.5 text-sm">
               {footerLinks.map((item) => (
+                <li key={item.to}>
+                  <Link to={item.to} className="text-ink-soft hover:text-ink">
+                    {item.label}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </nav>
+          <nav aria-label="Help and legal">
+            <ul className="grid gap-2.5 text-sm">
+              {legalLinks.map((item) => (
                 <li key={item.to}>
                   <Link to={item.to} className="text-ink-soft hover:text-ink">
                     {item.label}
