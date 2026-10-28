@@ -81,7 +81,7 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
         _startCooldown();
         return;
       }
-      router.go(auth.profile != null ? roleHomePath(auth.profile!.role) : '/');
+      router.go(postLoginPath(auth.profile?.role));
     } catch (error) {
       if (!mounted) return;
       setState(() => _formError = friendlyError(error, fallback: 'Something went wrong creating your account.'));

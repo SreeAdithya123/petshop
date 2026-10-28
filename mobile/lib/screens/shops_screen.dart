@@ -72,7 +72,7 @@ class ShopsScreen extends ConsumerWidget {
       );
     }
 
-    return RoleShell(title: 'Shops', actions: const [CartAppBarAction()], child: content);
+    return RoleShell(title: 'Shops', child: content);
   }
 }
 

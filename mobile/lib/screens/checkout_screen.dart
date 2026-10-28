@@ -28,11 +28,21 @@ class _PlacedLine {
 }
 
 class _PlacedOrder {
-  /// Null only if the server confirmed the order without returning its id.
+  /// The id the server returned: with one order per shop that is only the FIRST
+  /// order. Null only if the server confirmed the order without returning an id.
   final String? orderId;
+
+  /// The order that belongs to each shop in the cart (shop id -> order id), so
+  /// the confirmation and the "Message the shop" links reference the right one.
+  final Map<String, String> orderByShop;
   final num total;
   final List<_PlacedLine> lines;
-  const _PlacedOrder({required this.orderId, required this.total, required this.lines});
+  const _PlacedOrder({
+    required this.orderId,
+    required this.orderByShop,
+    required this.total,
+    required this.lines,
+  });
 }
 
 /// Shown when the request may or may not have reached the server.
@@ -143,11 +153,12 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     }
 
     final orderId = result is Map ? result['id']?.toString() : result?.toString();
+    final orderByShop = await _ordersByShop(pets, orderId);
     // Show the confirmation first so the emptied cart never flashes on screen.
     if (mounted) {
       setState(() {
         _placing = false;
-        _placed = _PlacedOrder(orderId: orderId, total: total, lines: lines);
+        _placed = _PlacedOrder(orderId: orderId, orderByShop: orderByShop, total: total, lines: lines);
       });
     }
     for (final pet in pets) {
@@ -155,6 +166,38 @@ class _CheckoutScreenState extends ConsumerState<CheckoutScreen> {
     }
     // The reserved pets are no longer "available": refresh the listings behind us.
     container.invalidate(catalogProvider);
+  }
+
+  /// A cart that spans shops becomes one order per shop, but `place_pet_order`
+  /// returns only the first order's id. Look up each shop's own order (best
+  /// effort) so the confirmation and support links name the right order.
+  Future<Map<String, String>> _ordersByShop(List<Pet> pets, String? firstOrderId) async {
+    final shopIds = {for (final pet in pets) pet.shopId};
+    if (shopIds.length <= 1) {
+      return (firstOrderId == null || shopIds.isEmpty) ? const {} : {shopIds.first: firstOrderId};
+    }
+    try {
+      final rows = await SupabaseService.client
+          .from('order_items')
+          .select('order_id, item_id, orders!inner(created_at, status)')
+          .eq('item_type', 'pet')
+          .inFilter('item_id', pets.map((pet) => pet.id).toList())
+          .eq('orders.status', 'pending')
+          .timeout(const Duration(seconds: 10));
+      final shopOfPet = {for (final pet in pets) pet.id: pet.shopId};
+      final newest = <String, ({String orderId, DateTime at})>{};
+      for (final row in (rows as List).cast<Map<String, dynamic>>()) {
+        final shopId = shopOfPet[row['item_id']];
+        final orderId = row['order_id'] as String?;
+        final at = DateTime.tryParse(((row['orders'] as Map?)?['created_at'] as String?) ?? '');
+        if (shopId == null || orderId == null || at == null) continue;
+        final current = newest[shopId];
+        if (current == null || at.isAfter(current.at)) newest[shopId] = (orderId: orderId, at: at);
+      }
+      return {for (final entry in newest.entries) entry.key: entry.value.orderId};
+    } catch (_) {
+      return const {};
+    }
   }
 
   /// Drops cart pets the catalog doesn't list. Runs after the frame so the
@@ -561,7 +604,6 @@ class _ConfirmedView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final orderId = order.orderId;
     // One entry per shop, in cart order.
     final shops = <String, String>{};
     for (final line in order.lines) {
@@ -584,8 +626,12 @@ class _ConfirmedView extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         Text(
-          'Your pets are reserved. The shop will confirm pickup details with you, and you pay in person when you '
-          'collect them. Nothing was charged online.',
+          shops.length > 1
+              ? 'Your pets are reserved. They come from ${shops.length} shops, so you have one order per shop. '
+                  'Each shop will confirm pickup details with you, and you pay in person when you collect them. '
+                  'Nothing was charged online.'
+              : 'Your pets are reserved. The shop will confirm pickup details with you, and you pay in person when you '
+                  'collect them. Nothing was charged online.',
           style: AppTheme.body(color: AppColors.inkSoft),
           textAlign: TextAlign.center,
         ),
@@ -594,22 +640,29 @@ class _ConfirmedView extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (orderId != null) ...[
-                Row(
-                  children: [
-                    Text('Order', style: AppTheme.body(fontSize: 14, color: AppColors.inkSoft)),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Text(
-                        shortId(orderId),
+              for (final entry in shops.entries)
+                if (order.orderByShop[entry.key] != null) ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          shops.length == 1 ? 'Order' : 'Order · ${entry.value}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTheme.body(fontSize: 14, color: AppColors.inkSoft),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Text(
+                        shortId(order.orderByShop[entry.key]!),
                         textAlign: TextAlign.end,
                         style: AppTheme.body(fontSize: 14, fontWeight: FontWeight.w600),
                       ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-              ],
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              if (order.orderByShop.isNotEmpty) const SizedBox(height: 6),
               _PetList(
                 children: [for (final line in order.lines) _PetRow(pet: line.pet, shopName: line.shopName)],
               ),
@@ -633,7 +686,7 @@ class _ConfirmedView extends StatelessWidget {
         for (final entry in shops.entries) ...[
           const SizedBox(height: 10),
           OutlinedButton.icon(
-            onPressed: () => context.push(shopSupportRoute(shopId: entry.key, orderId: orderId)),
+            onPressed: () => context.push(shopSupportRoute(shopId: entry.key, orderId: order.orderByShop[entry.key])),
             style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(52)),
             icon: const Icon(Icons.chat_bubble_outline, size: 18),
             label: Text(

@@ -151,7 +151,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     return RoleShell(
       title: 'PETSTA',
-      actions: const [CartAppBarAction()],
       child: RefreshIndicator(
         onRefresh: _refresh,
         child: ListView(

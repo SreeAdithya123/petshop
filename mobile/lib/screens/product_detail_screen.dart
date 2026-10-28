@@ -172,7 +172,6 @@ class _ProductDetailScreenState extends ConsumerState<ProductDetailScreen> {
 
     return RoleShell(
       title: product?.name ?? 'Product',
-      actions: const [CartAppBarAction()],
       child: body,
     );
   }

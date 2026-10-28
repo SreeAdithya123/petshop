@@ -116,7 +116,6 @@ class _GiftingScreenState extends ConsumerState<GiftingScreen> {
 
     return RoleShell(
       title: 'Gifting',
-      actions: const [CartAppBarAction()],
       child: RefreshIndicator(
         onRefresh: _refresh,
         child: ListView(

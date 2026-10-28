@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../state/auth_provider.dart';
 import '../state/cart_provider.dart';
+import '../state/wishlist_provider.dart';
 import '../theme/app_theme.dart';
 import 'content_width.dart';
 
@@ -20,6 +21,7 @@ const _customerNavItems = [
   _NavItem('Services', '/services'),
   _NavItem('Health', '/health'),
   _NavItem('Gifting', '/gifting'),
+  _NavItem('Wishlist', '/account/wishlist'),
   _NavItem('Support', '/support'),
 ];
 
@@ -94,12 +96,14 @@ class RoleShell extends ConsumerWidget {
     final hasCart = role == null ? auth.session == null : role == 'customer';
     final path = _currentPath(context);
     final showCart = hasCart && path != '/cart' && path != '/checkout';
+    final showWishlist = hasCart && path != '/account/wishlist';
 
     return Scaffold(
       appBar: AppBar(
         title: Text(title),
         actions: [
           ...?actions,
+          if (showWishlist) const _WishlistButton(),
           if (showCart) const _CartButton(),
         ],
       ),
@@ -137,6 +141,33 @@ class _BodyFrame extends StatelessWidget {
         if (constraints.maxWidth <= _kShellMaxWidth) return child;
         return ContentWidth(maxWidth: _kShellMaxWidth, child: SizedBox.expand(child: child));
       },
+    );
+  }
+}
+
+/// App-bar heart that opens the wishlist (with a count of saved pets).
+/// Visitors who are not logged in are sent to log in first.
+class _WishlistButton extends ConsumerWidget {
+  const _WishlistButton();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final count = ref.watch(wishlistControllerProvider.select((wishlist) => wishlist.petIds.length));
+    final label = count == 0 ? 'Wishlist' : 'Wishlist, $count saved ${count == 1 ? 'pet' : 'pets'}';
+    return IconButton(
+      tooltip: label,
+      onPressed: () {
+        final auth = ref.read(authControllerProvider);
+        final isCustomer = auth.status == AuthStatus.signedIn && auth.profile?.role == 'customer';
+        context.push(isCustomer ? '/account/wishlist' : '/login?from=${Uri.encodeComponent('/account/wishlist')}');
+      },
+      icon: ExcludeSemantics(
+        child: Badge.count(
+          count: count,
+          isLabelVisible: count > 0,
+          child: const Icon(Icons.favorite_border),
+        ),
+      ),
     );
   }
 }

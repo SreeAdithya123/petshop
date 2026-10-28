@@ -28,7 +28,6 @@ class ShopDetailScreen extends ConsumerWidget {
     if (catalog == null) {
       return RoleShell(
         title: 'Shop',
-        actions: const [CartAppBarAction()],
         child: catalogAsync.hasFailed
             ? ScrollableMessage(
                 child: CommerceRetryView(
@@ -45,7 +44,6 @@ class ShopDetailScreen extends ConsumerWidget {
     if (shop == null) {
       return RoleShell(
         title: 'Shop',
-        actions: const [CartAppBarAction()],
         child: RefreshIndicator(
           onRefresh: () => refreshCatalog(ref),
           child: ScrollableMessage(
@@ -68,7 +66,6 @@ class ShopDetailScreen extends ConsumerWidget {
 
     return RoleShell(
       title: shop.name,
-      actions: const [CartAppBarAction()],
       child: RefreshIndicator(
         onRefresh: () => refreshCatalog(ref),
         child: ListView(

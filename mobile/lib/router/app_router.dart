@@ -107,8 +107,10 @@ GoRouter buildRouter(Ref ref) {
       if (auth.status != AuthStatus.signedIn || auth.profile == null) return '/login';
 
       final role = auth.profile!.role;
-      if (needsSeller && role != 'shop_owner') return roleHomePath(role);
-      if (needsAdmin && role != 'admin') return roleHomePath(role);
+      // Wrong role for this area: bounce to the main page (customers) or the
+      // user's own dashboard (shop owners / admins).
+      if (needsSeller && role != 'shop_owner') return postLoginPath(role);
+      if (needsAdmin && role != 'admin') return postLoginPath(role);
       return null;
     },
     routes: [

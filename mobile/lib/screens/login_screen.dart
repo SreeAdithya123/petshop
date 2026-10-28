@@ -77,7 +77,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       if (from != null && profile.role == 'customer') {
         router.go(from);
       } else {
-        router.go(roleHomePath(profile.role));
+        router.go(postLoginPath(profile.role));
       }
     } catch (error) {
       if (!mounted) return;

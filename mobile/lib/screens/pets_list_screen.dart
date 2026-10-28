@@ -193,7 +193,6 @@ class _PetsListScreenState extends ConsumerState<PetsListScreen> {
 
     return RoleShell(
       title: 'Shop pets',
-      actions: const [CartAppBarAction()],
       child: ContentWidth(
         maxWidth: 1100,
         child: Column(

@@ -8,11 +8,13 @@ import '../models/models.dart';
 import '../state/auth_provider.dart';
 import '../state/cart_provider.dart';
 import '../state/catalog_provider.dart';
+import '../state/wishlist_provider.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import 'content_width.dart';
 import 'shared_widgets.dart';
 import 'skeletons.dart';
+import 'ui_kit.dart';
 
 // ---------------------------------------------------------------------------
 // Colours for text and fills that must stay readable on white. The brand pink
@@ -78,28 +80,6 @@ class ScrollableMessage extends StatelessWidget {
       physics: const AlwaysScrollableScrollPhysics(),
       padding: kScreenPadding,
       children: [ContentWidth(maxWidth: 560, child: child)],
-    );
-  }
-}
-
-/// App-bar cart button with an item-count badge, for the customer-facing
-/// screens. Hidden for shop owners and admins (they have no cart).
-class CartAppBarAction extends ConsumerWidget {
-  const CartAppBarAction({super.key});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final role = ref.watch(authControllerProvider).profile?.role;
-    if (role == 'shop_owner' || role == 'admin') return const SizedBox.shrink();
-    final count = ref.watch(cartControllerProvider).items.where((line) => line.itemType == 'pet').length;
-    return IconButton(
-      tooltip: count == 0 ? 'Cart' : 'Cart, $count ${count == 1 ? 'item' : 'items'}',
-      onPressed: () => context.push('/cart'),
-      icon: Badge(
-        isLabelVisible: count > 0,
-        label: Text('$count'),
-        child: const Icon(Icons.shopping_cart_outlined),
-      ),
     );
   }
 }
@@ -604,6 +584,52 @@ String? petCoverPhoto(Pet pet) => pet.photoUrls.isEmpty ? null : pet.photoUrls.f
 ///
 /// The photo and the text block are a single 48dp+ tap target that opens the
 /// pet; the shop's page is one tap further, on the pet's own page.
+/// Round heart button that saves / removes a pet from the customer's wishlist.
+/// Hidden for shop owners and admins (they have no wishlist); visitors who
+/// are not logged in are sent to log in first and come back afterwards.
+class WishlistHeart extends ConsumerWidget {
+  final String petId;
+  const WishlistHeart({super.key, required this.petId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final role = ref.watch(authControllerProvider.select((auth) => auth.profile?.role));
+    if (role == 'shop_owner' || role == 'admin') return const SizedBox.shrink();
+    final saved = ref.watch(wishlistControllerProvider.select((wishlist) => wishlist.isWishlisted(petId)));
+
+    Future<void> onTap() async {
+      final auth = ref.read(authControllerProvider);
+      if (auth.status != AuthStatus.signedIn || auth.profile?.role != 'customer') {
+        var here = '/';
+        try {
+          here = GoRouter.of(context).routeInformationProvider.value.uri.toString();
+        } catch (_) {}
+        context.push('/login?from=${Uri.encodeComponent(here)}');
+        return;
+      }
+      final message = await ref.read(wishlistControllerProvider).toggle(petId);
+      if (message != null && context.mounted) showSnack(context, message, error: true);
+    }
+
+    return Material(
+      color: Colors.white.withValues(alpha: 0.92),
+      shape: const CircleBorder(),
+      elevation: 1,
+      child: IconButton(
+        tooltip: saved ? 'Remove from wishlist' : 'Save to wishlist',
+        onPressed: onTap,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints.tightFor(width: 40, height: 40),
+        icon: Icon(
+          saved ? Icons.favorite : Icons.favorite_border,
+          size: 21,
+          color: saved ? AppColors.tertiary : AppColors.inkSoft,
+        ),
+      ),
+    );
+  }
+}
+
 class PetCard extends ConsumerWidget {
   final Pet pet;
 
@@ -667,6 +693,7 @@ class PetCard extends ConsumerWidget {
                             opacity: unavailable ? 0.5 : 1,
                             child: PetPhotoView(src: petCoverPhoto(pet), species: pet.species),
                           ),
+                          Positioned(right: 6, top: 6, child: WishlistHeart(petId: pet.id)),
                           if (unavailable)
                             Positioned(
                               left: 8,

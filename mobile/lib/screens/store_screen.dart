@@ -265,7 +265,6 @@ class _StoreScreenState extends State<StoreScreen> {
 
     return RoleShell(
       title: 'Store',
-      actions: const [CartAppBarAction()],
       child: ContentWidth(
         maxWidth: 1100,
         child: RefreshIndicator(

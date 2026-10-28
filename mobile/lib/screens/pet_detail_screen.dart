@@ -99,7 +99,6 @@ class _PetDetailScreenState extends ConsumerState<PetDetailScreen> {
     if (catalog == null) {
       return RoleShell(
         title: 'Pet details',
-        actions: const [CartAppBarAction()],
         child: catalogAsync.hasFailed
             ? ScrollableMessage(
                 child: CommerceRetryView(
@@ -116,7 +115,6 @@ class _PetDetailScreenState extends ConsumerState<PetDetailScreen> {
     if (pet == null) {
       return RoleShell(
         title: 'Pet details',
-        actions: const [CartAppBarAction()],
         child: RefreshIndicator(
           onRefresh: () => refreshCatalog(ref),
           child: ScrollableMessage(
@@ -158,7 +156,6 @@ class _PetDetailScreenState extends ConsumerState<PetDetailScreen> {
 
     return RoleShell(
       title: pet.displayName,
-      actions: const [CartAppBarAction()],
       child: RefreshIndicator(
         onRefresh: () => refreshCatalog(ref),
         child: ListView(
@@ -372,7 +369,6 @@ class _PetDetailScreenState extends ConsumerState<PetDetailScreen> {
   Widget _buildGiftReserved(String shopId) {
     return RoleShell(
       title: 'Gift reserved',
-      actions: const [CartAppBarAction()],
       child: ScrollableMessage(
         child: EmptyState(
           title: 'Gift reserved',

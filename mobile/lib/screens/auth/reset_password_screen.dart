@@ -75,7 +75,7 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
 
   void _continue() {
     final role = ref.read(authControllerProvider).profile?.role;
-    context.go(role == null ? '/' : roleHomePath(role));
+    context.go(postLoginPath(role));
   }
 
   /// Abandons the recovery: the temporary session is signed out so nobody is

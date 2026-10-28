@@ -426,6 +426,20 @@ final authControllerProvider = ChangeNotifierProvider<AuthController>((ref) {
   return AuthController();
 });
 
+/// Where a user lands right after logging in or signing up: customers (and
+/// anyone whose role isn't known yet) go to the main page, shop owners and
+/// admins to their dashboards. [roleHomePath] is the user's own "account" page.
+String postLoginPath(String? role) {
+  switch (role) {
+    case 'admin':
+      return '/admin/dashboard';
+    case 'shop_owner':
+      return '/seller/dashboard';
+    default:
+      return '/';
+  }
+}
+
 /// Mirrors roleHomePath() from src/store/authStore.js.
 String roleHomePath(String? role) {
   switch (role) {
